@@ -166,18 +166,38 @@ def main():
     current_distance = None
     while emin_iter < args.max_emin_iter:
         emin_iter += 1
-        print(f"\n--- Energy Minimization Iteration {emin_iter} ---")
-        emin_tpr, emin_coord = run_energy_minimization(emin_iter, current_coord)
-        current_distance = check_distance(emin_coord, emin_tpr, args.peptide_res, args.protein_res)
-        if current_distance <= args.distance_threshold:
+        print(f"\n--- Energy Minimization Iteration {emin_iter} (4 samples) ---")
+
+        sample_results = []
+        for sample_id in range(1, 5):  # 4개의 sample 실행
+            tag = f"{emin_iter}_{sample_id}"
+            tpr_file, coord_file = run_energy_minimization(tag, current_coord)
+            try:
+                dist = check_distance(coord_file, tpr_file, args.peptide_res, args.protein_res)
+                sample_results.append((dist, coord_file, tpr_file))
+            except Exception as e:
+                print(f"Sample {tag} 실패: {e}")
+
+        if not sample_results:
+            print("모든 에너지 최소화 sample이 실패했습니다. 시뮬레이션을 종료합니다.")
+            break
+
+        # 가장 짧은 거리의 sample 선택
+        sample_results.sort(key=lambda x: x[0])  # distance 기준 정렬
+        best_distance, best_coord, best_tpr = sample_results[0]
+
+        print(f"가장 짧은 거리: {best_distance:.3f} nm (선택된 sample)")
+
+        if best_distance <= args.distance_threshold:
             print("Cutoff 도달! Energy Minimization 단계 완료.")
-            current_coord = emin_coord
+            current_coord = best_coord
             break
         else:
             print("Cutoff에 도달하지 않았으므로, 에너지 최소화를 반복합니다.")
-            current_coord = emin_coord
+            current_coord = best_coord  # 다음 iteration의 시작 구조
     else:
         print("최대 Energy Minimization 반복 횟수에 도달하였습니다.")
+
     
     # Energy Minimization 후 cutoff 상태에서 MD 세그먼트 실행 (최종 pose 형성 탐색)
     previous_distance = None
