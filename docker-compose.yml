@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  sumd-gromacs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sumd-gromacs:latest
+    container_name: sumd-gromacs
+    volumes:
+      - ./scripts:/app/scripts
+      - ./mdp_templates:/app/mdp_templates
+      - ./test_data:/app/test_data
+      - ./output:/app/output
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+    # 대화형 사용을 위해 컨테이너 유지
+    tty: true
+    stdin_open: true

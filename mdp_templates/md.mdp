@@ -1,0 +1,37 @@
+; 분자 시뮬레이션 설정
+integrator              = md
+; dt=0.004로 증가하고 nsteps=2500000으로 감소하여 10ns 시뮬레이션을 더 빠르게 실행
+; (0.004 fs * 2500000 = 10000 ps = 10 ns)
+dt                      = 0.004     ; 4 fs (더 큰 타임스텝)
+nsteps                  = 2500000   ; 10 ns 시뮬레이션
+nstenergy               = 5000      ; 20 ps마다 에너지 저장
+nstlog                  = 5000      ; 20 ps마다 로그 파일 업데이트
+nstxout-compressed      = 5000      ; 20 ps마다 압축된 좌표 저장
+
+; 온도 커플링
+tcoupl                  = V-rescale
+tc-grps                 = Protein Water_and_ions
+tau_t                   = 0.1 0.1
+ref_t                   = 300 300
+
+; 압력 커플링
+pcoupl                  = Parrinello-Rahman
+pcoupltype              = isotropic
+tau_p                   = 2.0
+ref_p                   = 1.0
+compressibility         = 4.5e-5
+
+; 결합 제약
+constraints             = h-bonds
+constraint_algorithm    = LINCS
+lincs_iter              = 2        ; 더 큰 타임스텝을 위해 증가
+lincs_order             = 6        ; 더 큰 타임스텝을 위해 증가
+
+; 비결합 상호작용
+cutoff-scheme           = Verlet
+nstlist                 = 20
+ns_type                 = grid
+coulombtype             = PME
+rcoulomb                = 1.0
+rvdw                    = 1.0
+DispCorr                = EnerPres
