@@ -10,11 +10,12 @@ PROTEIN_RES=$3
 OUTPUT_DIR=${4:-"./output"}
 DISTANCE_THRESHOLD=${5:-0.5}
 PROCESS_CYS=${6:-"true"}  # 시스테인 처리 여부 (기본값: true)
+CHAIN_ID=${7:-""}         # 사용할 체인 ID (기본값: 없음, 첫 번째 체인 사용)
 
 # 인자 확인
 if [ -z "$PDB_FILE" ] || [ -z "$PEPTIDE_RES" ] || [ -z "$PROTEIN_RES" ]; then
-    echo "사용법: $0 <PDB_파일> <펩타이드_잔기_번호> <단백질_잔기_번호> [출력_디렉토리] [거리_임계값] [시스테인_처리]"
-    echo "예시: $0 complex.pdb \"45 46 47\" \"123 124 125\" ./results 0.5 true"
+    echo "사용법: $0 <PDB_파일> <펩타이드_잔기_번호> <단백질_잔기_번호> [출력_디렉토리] [거리_임계값] [시스테인_처리] [체인_ID]"
+    echo "예시: $0 complex.pdb \"45 46 47\" \"123 124 125\" ./results 0.5 true A"
     exit 1
 fi
 
@@ -112,6 +113,7 @@ echo "단백질 잔기: $PROTEIN_RES"
 echo "출력 디렉토리: $OUTPUT_DIR"
 echo "거리 임계값: $DISTANCE_THRESHOLD"
 echo "시스테인 처리: $PROCESS_CYS"
+echo "선택된 체인 ID: ${CHAIN_ID:-"자동 선택"}"
 
 # 시스테인 잔기 처리
 PROCESSED_PDB="$PDB_FILE"
@@ -121,13 +123,20 @@ if [ "$PROCESS_CYS" = "true" ]; then
     python3 /app/scripts/process_cystein.py --input "$PDB_FILE" --output "$PROCESSED_PDB"
 fi
 
+# 체인 ID 추가 인자 설정
+CHAIN_ARG=""
+if [ ! -z "$CHAIN_ID" ]; then
+    CHAIN_ARG="--chain $CHAIN_ID"
+fi
+
 # SuMD Gromacs 스크립트 실행
 python3 /app/scripts/sumd_gromacs.py \
     --pdb "$PROCESSED_PDB" \
     --peptide_res $PEPTIDE_RES \
     --protein_res $PROTEIN_RES \
     --output_dir "$OUTPUT_DIR" \
-    --distance_threshold "$DISTANCE_THRESHOLD"
+    --distance_threshold "$DISTANCE_THRESHOLD" \
+    $CHAIN_ARG
 
 # MD 시뮬레이션 결과가 있는지 확인하고 에너지 분석 실행
 if [ -f "$OUTPUT_DIR/md.xtc" ]; then

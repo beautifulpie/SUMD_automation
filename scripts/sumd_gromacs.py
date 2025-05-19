@@ -39,6 +39,7 @@ def run_command(cmd, shell=False, cwd=None, check=True, input_str=None, timeout=
             logger.info("명령어 성공적으로 실행됨")
         else:
             logger.error(f"명령어 실행 실패: {result.stderr.decode()}")
+            logger.error(f"오류 세부 정보: {result.stdout.decode()}")
         return result
     except subprocess.TimeoutExpired:
         logger.error(f"명령어 실행 시간 초과: {cmd}")
@@ -91,7 +92,42 @@ def create_index_file(output_file, peptide_res_list, protein_res_list):
         f.write("[ Protein ]\n")
         f.write(" ".join(protein_res_list) + "\n")
 
-def prepare_system(pdb_file, output_dir, force_field="charmm36-jul2022"):
+def get_chain_info(pdb_file):
+    """PDB 파일에서 체인 정보 추출"""
+    try:
+        # gmx pdb2gmx로 체인 정보 확인 (실제 변환하지 않고 정보만 추출)
+        result = subprocess.run(
+            ["gmx", "pdb2gmx", "-f", pdb_file, "-q"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False
+        )
+        
+        output = result.stdout.decode() + result.stderr.decode()
+        
+        # 체인 정보 파싱
+        chains = []
+        start_parsing = False
+        for line in output.split('\n'):
+            if "chain  #res #atoms" in line:
+                start_parsing = True
+                continue
+            if start_parsing and line.strip() and "chain" not in line:
+                parts = line.split()
+                if len(parts) >= 3 and "'" in line:
+                    chain_id = line.split("'")[1].strip()
+                    if chain_id and not chain_id.isspace() and "(only water)" not in line:
+                        chains.append((len(chains) + 1, chain_id))
+                        
+            if start_parsing and "water" in line and len(chains) > 0:
+                break
+        
+        return chains
+    except Exception as e:
+        logger.error(f"체인 정보 추출 중 오류 발생: {e}")
+        return [(1, 'A')]  # 기본값 반환
+
+def prepare_system(pdb_file, output_dir, force_field="charmm36-jul2022", selected_chain=None):
     """시스템 준비 (토폴로지 생성, 박스 설정, 솔베이션, 이온화)"""
     os.makedirs(output_dir, exist_ok=True)
     
@@ -105,16 +141,73 @@ def prepare_system(pdb_file, output_dir, force_field="charmm36-jul2022"):
     # 작업 디렉토리 변경
     os.chdir(output_dir)
     
-    # pdb2gmx 실행: 토폴로지 생성
-    run_command([
-        "gmx", "pdb2gmx", 
-        "-f", base_name,
-        "-o", "complex.gro",
-        "-p", "topol.top",
-        "-water", "tip3p",
-        "-ff", force_field,
-        "-ignh"
-    ])
+    # 체인 정보 확인
+    chains = get_chain_info(pdb_path)
+    
+    if not chains:
+        logger.warning("체인 정보를 가져올 수 없습니다. 기본 체인을 사용합니다.")
+        chains = [(1, 'A')]
+    
+    logger.info(f"사용 가능한 체인: {', '.join([f'{idx}({chain})' for idx, chain in chains])}")
+    
+    # 선택된 체인 처리
+    chain_to_use = None
+    chain_idx = None
+    
+    if selected_chain:
+        # 사용자가 지정한 체인 ID 찾기
+        for idx, chain_id in chains:
+            if chain_id == selected_chain:
+                chain_to_use = chain_id
+                chain_idx = idx
+                break
+        
+        if not chain_to_use:
+            logger.warning(f"지정한 체인 ID '{selected_chain}'를 찾을 수 없습니다. 첫 번째 체인을 사용합니다.")
+            chain_to_use = chains[0][1]
+            chain_idx = chains[0][0]
+    else:
+        # 기본적으로 첫 번째 체인 사용
+        chain_to_use = chains[0][1]
+        chain_idx = chains[0][0]
+    
+    logger.info(f"선택된 체인: {chain_idx}({chain_to_use})")
+    
+    # 포스필드 리스트 - 순서대로 시도
+    force_fields = [force_field, "amber99sb-ildn", "gromos54a7", "oplsaa"]
+    
+    success = False
+    for ff in force_fields:
+        try:
+            logger.info(f"{ff} 포스필드로 시도합니다...")
+            
+            # pdb2gmx 실행: 선택된 체인만 사용하여 토폴로지 생성
+            cmd_result = subprocess.run(
+                f"echo -e '{chain_idx}\nq\n' | gmx pdb2gmx -f {base_name} -o complex.gro -p topol.top -water tip3p -ff {ff} -ignh",
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False
+            )
+            
+            # 명령어 실행 결과 로깅
+            logger.info(f"{ff} 포스필드 실행 결과: {cmd_result.returncode}")
+            if cmd_result.returncode != 0:
+                logger.info(f"stdout: {cmd_result.stdout.decode()}")
+                logger.info(f"stderr: {cmd_result.stderr.decode()}")
+            
+            # 파일이 생성되었는지 확인
+            if os.path.exists("complex.gro") and os.path.exists("topol.top"):
+                logger.info(f"{ff} 포스필드로 성공적으로 실행됨")
+                success = True
+                break
+            else:
+                logger.warning(f"{ff} 포스필드로 실행했지만 필요한 파일이 생성되지 않았습니다.")
+        except Exception as e:
+            logger.warning(f"{ff} 포스필드로 시도 중 오류 발생: {e}")
+    
+    if not success:
+        raise Exception(f"시스템 준비 실패: 체인 {chain_to_use}에 대한 모든 포스필드 시도가 실패했습니다.")
     
     # editconf 실행: 박스 설정
     run_command([
@@ -141,7 +234,8 @@ def prepare_system(pdb_file, output_dir, force_field="charmm36-jul2022"):
         "-f", "/app/mdp_templates/ions.mdp",
         "-c", "solv.gro",
         "-p", "topol.top",
-        "-o", "ions.tpr"
+        "-o", "ions.tpr",
+        "-maxwarn", "10"
     ])
     
     # genion 실행: 이온 추가
@@ -167,7 +261,8 @@ def run_energy_minimization(input_gro, output_prefix, output_dir):
         "-f", "/app/mdp_templates/em.mdp",
         "-c", input_gro,
         "-p", "topol.top",
-        "-o", f"{output_prefix}.tpr"
+        "-o", f"{output_prefix}.tpr",
+        "-maxwarn", "10"
     ])
     
     # mdrun 실행: 에너지 최소화
@@ -189,7 +284,8 @@ def run_md_simulation(input_gro, output_prefix, output_dir, peptide_res, protein
         "-f", "/app/mdp_templates/md.mdp",
         "-c", input_gro,
         "-p", "topol.top",
-        "-o", f"{output_prefix}.tpr"
+        "-o", f"{output_prefix}.tpr",
+        "-maxwarn", "10"
     ])
     
     # mdrun 실행: MD 시뮬레이션
@@ -203,12 +299,18 @@ def run_md_simulation(input_gro, output_prefix, output_dir, peptide_res, protein
     create_index_file("index.ndx", peptide_res, protein_res)
     
     # 트라젝토리 변환 (선택사항)
-    run_command([
-        "echo", "non-Water", "|", "gmx", "trjconv",
-        "-s", f"{output_prefix}.tpr",
-        "-f", f"{output_prefix}.xtc",
-        "-o", "trajectory.pdb"
-    ], shell=True)
+    try:
+        run_command([
+            "echo", "Protein", "|", "gmx", "trjconv",
+            "-s", f"{output_prefix}.tpr",
+            "-f", f"{output_prefix}.xtc",
+            "-o", "trajectory.pdb",
+            "-pbc", "mol",
+            "-center"
+        ], shell=True)
+    except Exception as e:
+        logger.warning(f"트라젝토리 변환 중 오류 발생: {e}")
+        logger.warning("트라젝토리 변환을 건너뜁니다.")
     
     return f"{output_prefix}.gro", f"{output_prefix}.xtc"
 
@@ -220,6 +322,7 @@ def main():
     parser.add_argument("--output_dir", default="./output", help="출력 디렉토리")
     parser.add_argument("--distance_threshold", type=float, default=0.5, help="시뮬레이션 컷오프 거리 (nm, 기본값: 0.5)")
     parser.add_argument("--force_field", default="charmm36-jul2022", help="사용할 포스필드 (기본값: charmm36-jul2022)")
+    parser.add_argument("--chain", help="사용할 체인 ID (예: A, B, C...)")
     
     args = parser.parse_args()
     
@@ -228,7 +331,11 @@ def main():
     
     # 시스템 준비
     logger.info("시스템 준비 시작")
-    solv_ions_gro = prepare_system(args.pdb, args.output_dir, args.force_field)
+    try:
+        solv_ions_gro = prepare_system(args.pdb, args.output_dir, args.force_field, args.chain)
+    except Exception as e:
+        logger.error(f"시스템 준비 중 오류 발생: {e}")
+        return 1
     
     # 초기 무게중심 거리 계산
     initial_distance = calculate_distance(args.pdb, args.peptide_res, args.protein_res)
@@ -236,7 +343,11 @@ def main():
     
     # 에너지 최소화 실행
     logger.info("에너지 최소화 실행")
-    em_gro = run_energy_minimization(solv_ions_gro, "em", args.output_dir)
+    try:
+        em_gro = run_energy_minimization(solv_ions_gro, "em", args.output_dir)
+    except Exception as e:
+        logger.error(f"에너지 최소화 중 오류 발생: {e}")
+        return 1
     
     # 에너지 최소화 후 거리 계산
     em_distance = calculate_distance(os.path.join(args.output_dir, em_gro), args.peptide_res, args.protein_res)
@@ -245,7 +356,11 @@ def main():
     # 거리에 따라 MD 시뮬레이션 실행 여부 결정
     if em_distance <= args.distance_threshold:
         logger.info("거리가 임계값보다 작음. MD 시뮬레이션 실행")
-        md_gro, md_xtc = run_md_simulation(em_gro, "md", args.output_dir, args.peptide_res, args.protein_res)
+        try:
+            md_gro, md_xtc = run_md_simulation(em_gro, "md", args.output_dir, args.peptide_res, args.protein_res)
+        except Exception as e:
+            logger.error(f"MD 시뮬레이션 중 오류 발생: {e}")
+            return 1
         
         # MD 후 거리 계산
         md_distance = calculate_distance(os.path.join(args.output_dir, md_gro), args.peptide_res, args.protein_res)
@@ -261,6 +376,8 @@ def main():
         logger.info(f"초기 거리: {initial_distance:.3f} nm")
         logger.info(f"에너지 최소화 후 거리: {em_distance:.3f} nm")
         logger.info("에너지 최소화만 완료")
+    
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

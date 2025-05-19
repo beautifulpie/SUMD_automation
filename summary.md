@@ -61,18 +61,40 @@
    ```
 
 2. **시뮬레이션 실행**
-   ```bash
-   # Docker 컨테이너에서 스크립트 실행
-   docker exec -it sumd-gromacs \
-       /app/scripts/run_sumd_gromacs.sh \
-       /app/test_data/example.pdb \
-       "45 46 47" \
-       "123 124 125" \
-       /app/output \
-       0.5 \
-       true
-   ```
 
+   ```
+   # 기본 체인 사용 (첫 번째 체인)
+   docker exec -it sumd-gromacs /app/scripts/run_sumd_gromacs.sh \
+    /app/test_data/example.pdb \
+    "45 46 47" \
+    "123 124 125" \
+    /app/output \
+    0.5 \
+    true
+   ```
+```
+# 체인 A를 사용하여 시뮬레이션 실행
+docker exec -it sumd-gromacs /app/scripts/run_sumd_gromacs.sh \
+    /app/test_data/example.pdb \
+    "45 46 47" \
+    "123 124 125" \
+    /app/output \
+    0.5 \
+    true \
+    "A"
+```
+
+```
+# 체인 B를 사용하여 시뮬레이션 실행
+docker exec -it sumd-gromacs /app/scripts/run_sumd_gromacs.sh \
+    /app/test_data/example.pdb \
+    "45 46 47" \
+    "123 124 125" \
+    /app/output \
+    0.5 \
+    true \
+    "B"
+```
 3. **결과 확인**
    ```bash
    # 결과 파일 확인
