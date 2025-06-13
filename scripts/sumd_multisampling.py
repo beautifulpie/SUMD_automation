@@ -557,7 +557,7 @@ def run_multi_sample_iteration(input_file, output_dir, chain1, chain2, iteration
                 final_ang = result['final_distance'] * 10
                 f.write(f"  샘플 {result['sample_id']}: {result['simulation_type']} - {initial_ang:.1f}Å → {final_ang:.1f}Å\n")
     
-    return best_result['final_structure'], best_result['final_distance']_workers = min(num_samples, cpu_count())
+    return best_result['final_structure'], best_result['final_distance']
     
     # 다중 샘플 병렬 실행
     sample_results = []

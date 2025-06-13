@@ -74,12 +74,14 @@ if [ "$CLEAN_PDB" = "true" ]; then
     echo "PDB 파일에서 표준 아미노산만 추출 중..."
     CLEANED_PDB="${OUTPUT_DIR}/cleaned_$(basename "$PDB_FILE")"
     
-    if [ -f "/app/scripts/my_clean.py" ]; then
-        python3 /app/scripts/my_clean.py --input "$PDB_FILE" --output "$CLEANED_PDB"
-    elif [ -f "./my_clean.py" ]; then
-        python3 ./my_clean.py --input "$PDB_FILE" --output "$CLEANED_PDB"
+    if [ -f "/app/scripts/clean_pdb.py" ]; then
+        python3 /app/scripts/clean_pdb.py --input "$PDB_FILE" --output "$CLEANED_PDB"
+    elif [ -f "./scripts/clean_pdb.py" ]; then
+        python3 ./scripts/clean_pdb.py --input "$PDB_FILE" --output "$CLEANED_PDB"
+    elif [ -f "./clean_pdb.py" ]; then
+        python3 ./clean_pdb.py --input "$PDB_FILE" --output "$CLEANED_PDB"
     else
-        echo "경고: my_clean.py 스크립트를 찾을 수 없습니다. 원본 PDB 파일을 계속 사용합니다."
+        echo "경고: clean_pdb.py 스크립트를 찾을 수 없습니다. 원본 PDB 파일을 계속 사용합니다."
     fi
     
     # 파일이 성공적으로 생성되었는지 확인
@@ -96,12 +98,14 @@ if [ "$PROCESS_CYS" = "true" ]; then
     echo "시스테인 잔기 처리 중..."
     PROCESSED_PDB="${OUTPUT_DIR}/processed_cys_$(basename "$CURRENT_PDB")"
     
-    if [ -f "/app/scripts/my_process_cystein.py" ]; then
-        python3 /app/scripts/my_process_cystein.py --input "$CURRENT_PDB" --output "$PROCESSED_PDB"
-    elif [ -f "./my_process_cystein.py" ]; then
-        python3 ./my_process_cystein.py --input "$CURRENT_PDB" --output "$PROCESSED_PDB"
+    if [ -f "/app/scripts/process_cystein.py" ]; then
+        python3 /app/scripts/process_cystein.py --input "$CURRENT_PDB" --output "$PROCESSED_PDB"
+    elif [ -f "./scripts/process_cystein.py" ]; then
+        python3 ./scripts/process_cystein.py --input "$CURRENT_PDB" --output "$PROCESSED_PDB"
+    elif [ -f "./process_cystein.py" ]; then
+        python3 ./process_cystein.py --input "$CURRENT_PDB" --output "$PROCESSED_PDB"
     else
-        echo "경고: my_process_cystein.py 스크립트를 찾을 수 없습니다. 이전 파일을 계속 사용합니다."
+        echo "경고: process_cystein.py 스크립트를 찾을 수 없습니다. 이전 파일을 계속 사용합니다."
     fi
     
     # 파일이 성공적으로 생성되었는지 확인
@@ -115,14 +119,12 @@ fi
 
 # 3. 프로세스 기반 다중 샘플 시뮬레이션 스크립트 경로 확인
 MULTISAMPLING_SCRIPT=""
-if [ -f "/app/scripts/my_sumd_gromacs_multisampling_process.py" ]; then
-    MULTISAMPLING_SCRIPT="/app/scripts/my_sumd_gromacs_multisampling_process.py"
-elif [ -f "./my_sumd_gromacs_multisampling_process.py" ]; then
-    MULTISAMPLING_SCRIPT="./my_sumd_gromacs_multisampling_process.py"
-elif [ -f "/app/scripts/my_sumd_gromacs_multisampling.py" ]; then
-    MULTISAMPLING_SCRIPT="/app/scripts/my_sumd_gromacs_multisampling.py"
-elif [ -f "./my_sumd_gromacs_multisampling.py" ]; then
-    MULTISAMPLING_SCRIPT="./my_sumd_gromacs_multisampling.py"
+if [ -f "/app/scripts/sumd_multisampling.py" ]; then
+    MULTISAMPLING_SCRIPT="/app/scripts/sumd_multisampling.py"
+elif [ -f "./scripts/sumd_multisampling.py" ]; then
+    MULTISAMPLING_SCRIPT="./scripts/sumd_multisampling.py"
+elif [ -f "./sumd_multisampling.py" ]; then
+    MULTISAMPLING_SCRIPT="./sumd_multisampling.py"
 else
     echo "오류: 다중 샘플링 스크립트를 찾을 수 없습니다."
     exit 1
@@ -197,17 +199,19 @@ if [[ $RESULT == SUMD_RESULT:* ]]; then
         fi
         
         # 에너지 분석 실행 (선택적)
-        if [ -f "/app/scripts/my_energy_analysis.py" ] || [ -f "./my_energy_analysis.py" ]; then
+        if [ -f "/app/scripts/energy_analysis.py" ] || [ -f "./scripts/energy_analysis.py" ] || [ -f "./energy_analysis.py" ]; then
             echo ""
             echo "에너지 분석 실행 중..."
             
             # 최종 구조가 있는 디렉토리에서 에너지 분석 수행
             FINAL_DIR=$(dirname "$FINAL_FILE")
             
-            if [ -f "/app/scripts/my_energy_analysis.py" ]; then
-                ENERGY_SCRIPT="/app/scripts/my_energy_analysis.py"
+            if [ -f "/app/scripts/energy_analysis.py" ]; then
+                ENERGY_SCRIPT="/app/scripts/energy_analysis.py"
+            elif [ -f "./scripts/energy_analysis.py" ]; then
+                ENERGY_SCRIPT="./scripts/energy_analysis.py"
             else
-                ENERGY_SCRIPT="./my_energy_analysis.py"
+                ENERGY_SCRIPT="./energy_analysis.py"
             fi
             
             # 에너지 분석 실행 (체인 정보를 잔기 번호로 변환 필요)

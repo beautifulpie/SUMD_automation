@@ -99,3 +99,19 @@ docker exec -it sumd-gromacs /app/scripts/sumd_multisampling_shell.sh /app/test_
 - **후기 단계** (거리 ≤ 5Å): EM + MD로 정밀한 결합 최적화
 
 이제 귀하의 코드는 원본 SuMD 알고리즘의 다중 샘플 방식을 구현하면서도, 거리 기반 적응형 시뮬레이션 전략으로 계산 효율성과 정확도를 모두 향상시켰습니다.
+
+## debug
+
+```bash
+python3 ./scripts/sumd_multisampling.py \
+    --input "../sumd_output/_20250613_155312/processed_cys_cleaned_example.pdb" \
+    --chain1 "A" \
+    --chain2 "B" \
+    --output_dir "../sumd_output/" \
+    --distance_threshold 0.5 \
+    --max_iterations 3 \
+    --num_samples 5 \
+    --simulation_time 2 \
+    --simulation_threshold 5.0 \
+    --max_workers 4
+```
