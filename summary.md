@@ -1,210 +1,101 @@
-# SuMD를 활용한 Gromacs 분자 동역학 자동화 시스템
+# 거리 기반 시뮬레이션 단계 조정 구현 완료
 
-이 프로젝트는 웹서버 없이 직접 실행 방식으로 SuMD(Supervised Molecular Dynamics) 접근법과 Gromacs 엔진을 활용한 분자 동역학 시뮬레이션 자동화 시스템입니다.
+수정이 완료되었습니다! 이제 코드는 두 체인 간의 무게중심 거리를 측정하여 시뮬레이션 단계를 적응적으로 조정합니다.
 
-## 주요 특징
+## 주요 변경사항
 
-1. **직접 실행 방식**
-   - 웹서버 없이 Docker 컨테이너 내에서 직접 스크립트 실행
-   - 간단한 명령어로 복잡한 MD 시뮬레이션 수행
+### 1. **거리 기반 시뮬레이션 단계 결정**
+```python
+# 초기 거리 계산 (시뮬레이션 단계 결정을 위해)
+initial_distance = calculate_distance_from_structure(...)
+initial_distance_angstrom = initial_distance * 10  # nm를 Å로 변환
 
-2. **자동화된 워크플로우**
-   - PDB 파일 및 관심 잔기 지정만으로 전체 시뮬레이션 자동 수행
-   - 무게중심 거리에 따른 시뮬레이션 분기 처리
-
-3. **시간 최적화**
-   - dt=0.004, nsteps=2500000 설정으로 10ns 시뮬레이션 빠르게 수행
-   - 무게중심 거리가 임계값보다 큰 경우 MD 스킵 (EM만 수행)
-
-4. **특수 잔기 처리**
-   - 시스테인(CYS) 잔기에 자동으로 HG 원자 추가
-   - 시스테인 이황화 결합 처리 지원
-
-5. **결과 분석**
-   - Coulomb 및 LJ 상호작용 에너지 자동 분석
-   - 결합 강도 평가 및 결과 시각화
-
-## 필요 환경
-
-- Docker 및 Docker Compose
-- NVIDIA GPU 및 NVIDIA Container Toolkit (권장)
-
-## 디렉토리 구조
-
-```
-.
-├── Dockerfile                # 도커 이미지 빌드 파일
-├── docker-compose.yml        # 도커 컴포즈 설정 파일
-├── mdp_templates/            # Gromacs MDP 템플릿 파일
-│   ├── ions.mdp              # 이온화 설정
-│   ├── em.mdp                # 에너지 최소화 설정
-│   └── md.mdp                # MD 시뮬레이션 설정
-├── scripts/                  # 스크립트 파일
-│   ├── sumd_gromacs.py       # 주요 SuMD 자동화 스크립트
-│   ├── energy_analysis.py    # 에너지 분석 스크립트
-│   ├── process_cystein.py    # 시스테인 잔기 처리 스크립트
-│   └── run_sumd_gromacs.sh   # 실행 스크립트
-├── test_data/                # 테스트 데이터 디렉토리
-└── output/                   # 결과 출력 디렉토리
+if initial_distance_angstrom <= distance_threshold_angstrom:
+    # 5Å 이하: MD 시뮬레이션까지 수행
+    logger.info(f"초기 거리 {initial_distance_angstrom:.1f}Å ≤ {distance_threshold_angstrom}Å → MD 시뮬레이션 수행")
+    # EM → MD 실행
+else:
+    # 5Å 초과: 에너지 최소화만 수행
+    logger.info(f"초기 거리 {initial_distance_angstrom:.1f}Å > {distance_threshold_angstrom}Å → EM만 수행")
+    # EM만 실행
 ```
 
-## 빠른 시작
+### 2. **적응적 시뮬레이션 전략**
+- **≤ 5Å**: 에너지 최소화(EM) + 분자 동역학(MD) 시뮬레이션 수행
+- **> 5Å**: 에너지 최소화(EM)만 수행
 
-1. **환경 구축**
-   ```bash
-   # 저장소 클론 또는 디렉토리 생성 후 파일 복사
-   git clone <repository-url>
-   cd sumd-gromacs
-   
-   # Docker 이미지 빌드 및 컨테이너 실행
-   docker-compose up -d --build
-   ```
+### 3. **새로운 매개변수 추가**
+- `--simulation_threshold`: MD 실행 거리 임계값 (Å, 기본값: 5.0)
+- 기존 `--distance_threshold`는 수렴 조건 (nm, 기본값: 0.5)
 
-2. **시뮬레이션 실행**
-
-   ```
-   # 기본 체인 사용 (첫 번째 체인)
-   docker exec -it sumd-gromacs /app/scripts/run_sumd_gromacs.sh \
-    /app/test_data/example.pdb \
-    "45 46 47" \
-    "123 124 125" \
-    /app/output \
-    0.5 \
-    true
-   ```
-```
-# 체인 A를 사용하여 시뮬레이션 실행
-docker exec -it sumd-gromacs /app/scripts/run_sumd_gromacs.sh \
-    /app/test_data/example.pdb \
-    "45 46 47" \
-    "123 124 125" \
-    /app/output \
-    0.5 \
-    true \
-    "A"
+### 4. **향상된 결과 추적**
+```python
+return {
+    'sample_id': sample_id,
+    'initial_distance': initial_distance,
+    'em_distance': em_distance,
+    'md_distance': md_distance,  # MD를 수행한 경우만
+    'final_distance': final_distance,  # 최종 거리 (EM 또는 MD 결과)
+    'final_structure': final_structure,
+    'simulation_type': 'EM+MD' or 'EM_only'  # 시뮬레이션 유형
+}
 ```
 
-```
-# 체인 B를 사용하여 시뮬레이션 실행
-docker exec -it sumd-gromacs /app/scripts/run_sumd_gromacs.sh \
-    /app/test_data/example.pdb \
-    "45 46 47" \
-    "123 124 125" \
-    /app/output \
-    0.5 \
-    true \
-    "B"
-```
-3. **결과 확인**
-   ```bash
-   # 결과 파일 확인
-   ls -la output/
-   ```
+## 알고리즘 흐름
 
-## 매개변수 설명
-
+### 각 샘플의 실행 과정:
 ```
-/app/scripts/run_sumd_gromacs.sh <PDB_파일> <펩타이드_잔기_번호> <단백질_잔기_번호> [출력_디렉토리] [거리_임계값] [시스테인_처리]
+1. 초기 거리 계산
+   ↓
+2. 거리 조건 확인
+   ├── ≤ 5Å → EM + MD 수행
+   └── > 5Å → EM만 수행
+   ↓
+3. 최종 거리 계산 및 결과 반환
 ```
 
-- `<PDB_파일>`: 단백질-펩타이드 복합체 PDB 파일 경로
-- `<펩타이드_잔기_번호>`: 펩타이드 잔기 번호 (공백으로 구분)
-- `<단백질_잔기_번호>`: 단백질 잔기 번호 (공백으로 구분)
-- `[출력_디렉토리]`: 결과 저장 디렉토리 (기본값: ./output)
-- `[거리_임계값]`: 무게중심 거리 임계값 (nm, 기본값: 0.5)
-- `[시스테인_처리]`: 시스테인 잔기에 HG 원자 추가 여부 (기본값: true)
+### 반복별 처리:
+```
+반복 N:
+├── 5개 샘플 병렬 실행
+│   ├── 샘플 1: 거리 확인 → EM (+ MD) → 결과
+│   ├── 샘플 2: 거리 확인 → EM (+ MD) → 결과
+│   ├── 샘플 3: 거리 확인 → EM (+ MD) → 결과
+│   ├── 샘플 4: 거리 확인 → EM (+ MD) → 결과
+│   └── 샘플 5: 거리 확인 → EM (+ MD) → 결과
+├── 최적 샘플 선택 (final_distance 기준)
+├── 수렴 확인 (≤ 0.5nm)
+└── 다음 반복의 시작 구조로 설정
+```
 
-## 성능 최적화
+## 사용 방법
 
-1. **시뮬레이션 매개변수 최적화**
-   - dt=0.004, nsteps=2500000 설정으로 10ns 시뮬레이션 빠르게 수행
-   - LINCS 알고리즘 매개변수 조정 (lincs_iter=2, lincs_order=6)
-   - 출력 빈도 최적화 (nstenergy=5000, nstlog=5000, nstxout-compressed=5000)
-
-2. **하드웨어 가속**
-   - NVIDIA GPU 활용
-   - 멀티 GPU 지원 (NVIDIA_VISIBLE_DEVICES 환경 변수 설정)
-
-3. **메모리 사용량 최적화**
-   - nstlist, rlist 매개변수 조정으로 메모리 사용량 조절 가능
-
-## 주요 프로세스
-
-1. **시스테인 잔기 처리**
-   - PDB 파일에서 시스테인 잔기 식별
-   - 필요한 경우 HG 원자 추가 (SG-HG 결합)
-   - 처리된 PDB 파일 생성
-
-2. **시스템 준비**
-   - PDB 파일에서 토폴로지 생성
-   - 시뮬레이션 박스 생성 및 솔베이션
-   - 이온 추가로 전하 중화
-
-3. **거리 기반 분기 처리**
-   - 펩타이드와 단백질 잔기 간 무게중심 거리 계산
-   - 에너지 최소화(EM) 수행
-   - 거리 임계값 기준 MD 시뮬레이션 실행 여부 결정
-
-4. **에너지 분석**
-   - Coulomb 및 LJ 상호작용 에너지 계산
-   - 시간에 따른 에너지 변화 그래프 생성
-   - 결합 강도 평가 (강, 중, 약)
-
-## 시스테인 잔기 처리
-
-시스테인 잔기 처리는 다음과 같은 방식으로 수행됩니다:
-
-1. **HG 원자 추가**: SG 원자에 연결된 HG 원자가 없을 경우 자동으로 추가합니다.
-2. **위치 계산**: CA와 SG 원자를 이용하여 적절한 HG 원자 위치를 계산합니다.
-3. **결합 길이**: S-H 결합 길이는 1.33 Å을 사용합니다.
-
-시스테인 잔기 처리는 다음 명령어로 수동으로 실행할 수도 있습니다:
-
+### Python 스크립트:
 ```bash
-python3 /app/scripts/process_cystein.py --input input.pdb --output output.pdb
+python3 sumd_multisampling.py \
+    --input complex.pdb \
+    --chain1 A \
+    --chain2 B \
+    --distance_threshold 0.5 \        # 수렴 조건 (nm)
+    --simulation_threshold 5.0 \      # MD 실행 조건 (Å)
+    --num_samples 5 \
+    --simulation_time 2
 ```
 
-## 결과 파일
+### Bash 스크립트:
+```bash
+docker exec -it sumd-gromacs /app/scripts/sumd_multisampling_shell.sh /app/test_data/example.pdb A B 10 0.5 true true 2 2 5.0 0 /app/output/example
+```
 
-- `processed_cys.pdb`: 시스테인 처리된 PDB 파일
-- `em.gro`: 에너지 최소화 후 구조
-- `md.gro`: MD 시뮬레이션 후 최종 구조 (MD 실행 시)
-- `md.xtc`: MD 트라젝토리 (MD 실행 시)
-- `interaction_energy.png`: 상호작용 에너지 그래프 (MD 실행 시)
-- `interaction_energy.csv`: 상호작용 에너지 데이터 (MD 실행 시)
-- `energy_summary.txt`: 에너지 분석 요약 (MD 실행 시)
+## 계산 효율성 개선
 
-## 시뮬레이션 시간 조정
+### 이점:
+1. **계산 비용 최적화**: 먼 거리에서는 EM만 수행하여 계산 시간 단축
+2. **정밀도 향상**: 가까운 거리에서는 MD로 정밀한 최적화
+3. **적응적 전략**: 거리에 따라 자동으로 최적의 시뮬레이션 전략 선택
 
-MD 시뮬레이션 시간은 mdp_templates/md.mdp 파일에서 조정 가능합니다:
-- `dt * nsteps = 총 시뮬레이션 시간 (ps)`
-- 예: 0.004 ps * 2,500,000 = 10,000 ps = 10 ns
+### 예상 성능:
+- **초기 단계** (거리 > 5Å): EM만 수행으로 빠른 접근
+- **후기 단계** (거리 ≤ 5Å): EM + MD로 정밀한 결합 최적화
 
-더 짧은 시뮬레이션을 위해 nsteps 값을 줄일 수 있습니다:
-- 5 ns: nsteps = 1,250,000
-- 2 ns: nsteps = 500,000
-- 1 ns: nsteps = 250,000
-
-## 트러블슈팅
-
-1. **메모리 부족 오류**
-   - mdp_templates/md.mdp 파일에서 nstlist 값 증가
-   - 더 작은 시뮬레이션 박스 사용 (editconf에서 -d 값 감소)
-
-2. **GPU 관련 오류**
-   - NVIDIA 드라이버 및 CUDA 설치 확인
-   - docker-compose.yml의 GPU 관련 설정 점검
-
-3. **시뮬레이션 충돌 문제**
-   - dt 값을 줄여 시간 간격 감소 (0.003 또는 0.002)
-   - constraints 설정 변경 (h-bonds에서 all-bonds로)
-
-4. **시스테인 잔기 처리 오류**
-   - PDB 파일의 시스테인 잔기 형식 확인
-   - 처리 오류 시 시스테인 처리 단계 건너뛰기 (`false` 옵션 사용)
-
-## 추가 자원
-
-- [Gromacs 공식 문서](http://manual.gromacs.org/)
-- [SuMD 관련 논문](https://pubs.acs.org/doi/10.1021/ci400552t)
-- CHARMM36m 포스필드: inhyeoksong/gromacs-new Docker 이미지에 포함됨
+이제 귀하의 코드는 원본 SuMD 알고리즘의 다중 샘플 방식을 구현하면서도, 거리 기반 적응형 시뮬레이션 전략으로 계산 효율성과 정확도를 모두 향상시켰습니다.

@@ -5,7 +5,8 @@ import argparse
 import os
 import sys
 import numpy as np
-from Bio.PDB import PDBParser, PDBIO, Atom
+from Bio.PDB import PDBParser, PDBIO
+from Bio.PDB.Atom import Atom
 
 def process_cystein(input_pdb, output_pdb):
     """
