@@ -1,0 +1,272 @@
+{
+  "gromacs_commands": {
+    "pdb2gmx": {
+      "description": "PDB를 GROMACS 토폴로지로 변환",
+      "template": "gmx pdb2gmx -f {input_pdb} -o {output_gro} -p {output_top} -water {water_model} -ff {force_field} -ignh",
+      "defaults": {
+        "water_model": "tip3p",
+        "force_field": "charmm36-jul2022"
+      },
+      "required_files": ["{input_pdb}"],
+      "output_files": ["{output_gro}", "{output_top}"],
+      "force_field_options": [
+        "charmm36-jul2022",
+        "amber99sb-ildn", 
+        "gromos54a7",
+        "oplsaa"
+      ]
+    },
+    
+    "editconf": {
+      "description": "시뮬레이션 박스 설정",
+      "template": "gmx editconf -f {input_gro} -o {output_gro} -c -d {box_distance} -bt {box_type}",
+      "defaults": {
+        "box_distance": "1.0",
+        "box_type": "cubic"
+      },
+      "large_system_overrides": {
+        "box_distance": "1.5"
+      },
+      "required_files": ["{input_gro}"],
+      "output_files": ["{output_gro}"]
+    },
+    
+    "solvate": {
+      "description": "수용액으로 시스템 채우기",
+      "template": "gmx solvate -cp {input_gro} -cs {solvent_gro} -o {output_gro} -p {topology}",
+      "defaults": {
+        "solvent_gro": "spc216.gro"
+      },
+      "required_files": ["{input_gro}", "{topology}"],
+      "output_files": ["{output_gro}"]
+    },
+    
+    "grompp_ions": {
+      "description": "이온 추가를 위한 전처리",
+      "template": "gmx grompp -f {mdp_file} -c {input_gro} -p {topology} -o {output_tpr} -maxwarn {maxwarn}",
+      "defaults": {
+        "maxwarn": "10"
+      },
+      "large_system_overrides": {
+        "maxwarn": "15"
+      },
+      "required_files": ["{mdp_file}", "{input_gro}", "{topology}"],
+      "output_files": ["{output_tpr}"]
+    },
+    
+    "genion": {
+      "description": "이온 추가로 중성화",
+      "template": "gmx genion -s {input_tpr} -o {output_gro} -p {topology} -pname {positive_ion} -nname {negative_ion} -neutral",
+      "defaults": {
+        "solvent_group": "SOL",
+        "positive_ion": "NA",
+        "negative_ion": "CL"
+      },
+      "input_required": true,
+      "input_template": "{solvent_group}",
+      "required_files": ["{input_tpr}", "{topology}"],
+      "output_files": ["{output_gro}"]
+    },
+    
+    "grompp_simulation": {
+      "description": "시뮬레이션을 위한 전처리",
+      "template": "gmx grompp -f {mdp_file} -c {input_gro} -p {topology} -o {output_tpr} -maxwarn {maxwarn}",
+      "defaults": {
+        "maxwarn": "10"
+      },
+      "large_system_overrides": {
+        "maxwarn": "15"
+      },
+      "required_files": ["{mdp_file}", "{input_gro}", "{topology}"],
+      "output_files": ["{output_tpr}"]
+    },
+    
+    "mdrun": {
+      "description": "분자 시뮬레이션 실행 (Thread-MPI 버전)",
+      "template": "gmx mdrun -v {prefix} -ntomp {ntomp} -nb {nb_mode} -gpu_id {gpu_id}",
+      "defaults": {
+        "ntomp": "2",
+        "nb_mode": "gpu",
+        "gpu_id": "3"
+      },
+      "parallel_options": {
+        "enable_auto": false,
+        "note": "Thread-MPI 버전에서는 -nt 옵션으로 총 스레드 수 제어 가능"
+      },
+      "required_files": ["{prefix}.tpr"],
+      "output_files": ["{prefix}.gro", "{prefix}.log", "{prefix}.edr"]
+    },
+    
+    "mdrun_mpi": {
+      "description": "분자 시뮬레이션 실행 (MPI 버전)",
+      "template": "mpirun --allow-run-as-root -np {mpi_ranks} gmx_mpi mdrun -v {prefix} -ntomp {ntomp} -nb {nb_mode} -gpu_id {gpu_id}",
+      "defaults": {
+        "mpi_ranks": "4",
+        "ntomp": "2", 
+        "nb_mode": "gpu",
+        "gpu_id": "3"
+      },
+      "large_system_overrides": {
+        "mpi_ranks": "8",
+        "ntomp": "4"
+      },
+      "gpu_options": {
+        "pme_mode": "auto",
+        "bonded_mode": "auto",
+        "update_mode": "auto"
+      },
+      "parallel_options": {
+        "enable_auto": true,
+        "note": "MPI 버전에서는 mpirun으로 프로세스 수 제어"
+      },
+      "required_files": ["{prefix}.tpr"],
+      "output_files": ["{prefix}.gro", "{prefix}.log", "{prefix}.edr"]
+    },
+    
+    "mdrun_em": {
+      "description": "에너지 최소화 실행 (MPI + GPU)",
+      "template": "mpirun --allow-run-as-root -np {mpi_ranks} gmx_mpi mdrun -v -deffnm {prefix} -ntomp {ntomp} -nb {nb_mode} -gpu_id {gpu_id}",
+      "defaults": {
+        "mpi_ranks": "4",
+        "ntomp": "2",
+        "nb_mode": "gpu", 
+        "gpu_id": "3"
+      },
+      "large_system_overrides": {
+        "mpi_ranks": "6",
+        "ntomp": "3"
+      },
+      "required_files": ["{prefix}.tpr"],
+      "output_files": ["{prefix}.gro", "{prefix}.log", "{prefix}.edr"]
+    },
+    
+    "mdrun_md": {
+      "description": "MD 시뮬레이션 실행 (MPI + GPU)",
+      "template": "mpirun --allow-run-as-root -np {mpi_ranks} gmx_mpi mdrun -v -deffnm {prefix} -ntomp {ntomp} -nb {nb_mode} -gpu_id {gpu_id} -pme {pme_mode}",
+      "defaults": {
+        "mpi_ranks": "4",
+        "ntomp": "2",
+        "nb_mode": "gpu",
+        "gpu_id": "3",
+        "pme_mode": "auto"
+      },
+      "large_system_overrides": {
+        "mpi_ranks": "8",
+        "ntomp": "2",
+        "pme_mode": "cpu"
+      },
+      "gpu_advanced_options": {
+        "bonded": "auto",
+        "update": "auto", 
+        "pmefft": "auto"
+      },
+      "required_files": ["{prefix}.tpr"],
+      "output_files": ["{prefix}.gro", "{prefix}.log", "{prefix}.edr"]
+    },
+    
+    "mdrun_multi_gpu": {
+      "description": "다중 GPU MD 시뮬레이션 실행",
+      "template": "mpirun --allow-run-as-root -np {mpi_ranks} gmx_mpi mdrun -v -deffnm {prefix} -ntomp {ntomp} -nb {nb_mode} -gpu_id {gpu_ids} -gputasks {gpu_tasks}",
+      "defaults": {
+        "mpi_ranks": "4",
+        "ntomp": "2",
+        "nb_mode": "gpu",
+        "gpu_ids": "23",
+        "gpu_tasks": "0011"
+      },
+      "multi_gpu_notes": "gpu_ids와 gpu_tasks는 GPU 개수와 랭크 수에 맞게 조정 필요",
+      "required_files": ["{prefix}.tpr"],
+      "output_files": ["{prefix}.gro", "{prefix}.log", "{prefix}.edr"]
+    },
+    
+    "trjconv": {
+      "description": "궤적 파일 변환",
+      "template": "gmx trjconv -s {structure_file} -f {input_trajectory} -o {output_file} -pbc {pbc_option}",
+      "defaults": {
+        "group": "Protein",
+        "pbc_option": "mol"
+      },
+      "input_required": true,
+      "input_template": "{group}",
+      "required_files": ["{structure_file}", "{input_trajectory}"],
+      "output_files": ["{output_file}"]
+    }
+  },
+  
+  "mpi_settings": {
+    "container_environment": {
+      "allow_root": true,
+      "environment_variables": {
+        "OMPI_ALLOW_RUN_AS_ROOT": "1",
+        "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM": "1"
+      }
+    },
+    "performance_tuning": {
+      "cpu_affinity": true,
+      "gpu_direct_communication": true,
+      "environment_variables": {
+        "GMX_GPU_DD_COMMS": "true",
+        "GMX_GPU_PME_PP_COMMS": "true",
+        "GMX_DISABLE_GPU_TIMING": "1"
+      }
+    }
+  },
+  
+  "gpu_settings": {
+    "default_gpu_id": "3",
+    "nvidia_optimizations": {
+      "cuda_graphs": false,
+      "environment_variables": {
+        "GMX_CUDA_GRAPH": "0"
+      }
+    },
+    "multi_gpu_configurations": {
+      "2_gpu": {
+        "gpu_ids": "23",
+        "recommended_ranks": "4",
+        "gputasks": "0011"
+      },
+      "4_gpu": {
+        "gpu_ids": "0123", 
+        "recommended_ranks": "8",
+        "gputasks": "00112233"
+      }
+    }
+  },
+  
+  "timeout_settings": {
+    "small_system": {
+      "pdb2gmx": 60,
+      "editconf": 30,
+      "solvate": 120,
+      "grompp": 60,
+      "genion": 60,
+      "mdrun_em": 300,
+      "mdrun_md": 900,
+      "mdrun_mpi": 1200,
+      "trjconv": 60
+    },
+    "medium_system": {
+      "pdb2gmx": 120,
+      "editconf": 60,
+      "solvate": 300,
+      "grompp": 120,
+      "genion": 120,
+      "mdrun_em": 600,
+      "mdrun_md": 1800,
+      "mdrun_mpi": 2400,
+      "trjconv": 120
+    },
+    "large_system": {
+      "pdb2gmx": 300,
+      "editconf": 120,
+      "solvate": 600,
+      "grompp": 300,
+      "genion": 300,
+      "mdrun_em": 1800,
+      "mdrun_md": 3600,
+      "mdrun_mpi": 4800,
+      "trjconv": 300
+    }
+  }
+}
