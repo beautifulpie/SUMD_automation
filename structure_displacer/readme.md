@@ -81,11 +81,15 @@ python example_workflow.py \
     --min_quality_score 0.8
 
 # SuMD 없이 변형/분석만 실행
-python example_workflow.py \
-    --golden_standard native_complex.pdb \
+python3 example_workflow.py \
+    --golden_standard /app/test_data/2odb.pdb \
     --target_chains A,B \
-    --num_variants 5 \
-    --skip_sumd
+    --target_distance 50.0 \
+    --num_variants 3 \
+    --max_attempts 5 \
+    --output_dir /app/test_english_plots \
+    --skip_sumd \
+    --verbose
 ```
 
 ## 📋 **결과 해석 가이드**

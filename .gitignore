@@ -1,0 +1,98 @@
+# Test files
+test.txt
+*test*.txt
+*.test
+
+# Output directories and results
+*output*/
+*result*/
+workflow_output*/
+displaced_structures*/
+quality_analysis*/
+sumd_simulation*/
+auto_created_output/
+test_*/
+
+# Temporary files
+*.tmp
+*.temp
+*~
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment files
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Log files
+*.log
+logs/
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Data files (large)
+*.pdb.gz
+*.xtc
+*.trr
+*.gro.backup
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Plot files (if not needed in repo)
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.svg
+
+# Specific test output patterns
+*displaced_*
+*analysis_*
+workflow_result_*.json

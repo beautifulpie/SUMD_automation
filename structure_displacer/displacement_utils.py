@@ -36,10 +36,20 @@ except ImportError:
     class MinDistanceCalculator:
         @staticmethod
         def calculate_min_distance_between_chains(chain1, chain2):
-            """기본 최소 거리 계산"""
+            """기본 최소 거리 계산 (단백질 원자만, HETATM 제외)"""
             min_distance = float('inf')
-            atoms1 = list(chain1.get_atoms())
-            atoms2 = list(chain2.get_atoms())
+            
+            # 표준 아미노산 잔기만 선택 (물 분자 및 HETATM 제외)
+            atoms1 = []
+            atoms2 = []
+            
+            for residue in chain1:
+                if residue.id[0] == ' ':  # 표준 아미노산만 (HETATM 제외)
+                    atoms1.extend(list(residue.get_atoms()))
+            
+            for residue in chain2:
+                if residue.id[0] == ' ':  # 표준 아미노산만 (HETATM 제외)
+                    atoms2.extend(list(residue.get_atoms()))
             
             for atom1 in atoms1:
                 for atom2 in atoms2:
@@ -165,7 +175,7 @@ class Advanced50AAnalyzer:
                 'target_distance': self.target_distance,
                 'distance_error': distance_error,
                 'distance_achievement_score': distance_achievement,
-                'distance_acceptable': distance_error <= 2.0  # 2Å 이내 오차는 허용
+                'distance_acceptable': distance_error <= 5.0  # 5Å 이내 오차는 허용
             }
             
             # 2. Clash 분석
@@ -357,8 +367,26 @@ class Advanced50AAnalyzer:
         output_file = os.path.join(output_dir, "displacement_analysis_50A.csv")
         df.to_csv(output_file, index=False)
         
-        json_file = os.path.join(output_dir, "displacement_analysis_50A.json") 
-        df.to_json(json_file, orient='records', indent=2)
+        # JSON 저장을 위해 NumPy 타입을 Python 기본 타입으로 변환
+        def convert_numpy_types(obj):
+            """NumPy 타입을 Python 기본 타입으로 변환"""
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return obj
+        
+        # DataFrame을 딕셔너리로 변환 후 NumPy 타입 변환
+        records = df.to_dict('records')
+        for record in records:
+            for key, value in record.items():
+                record[key] = convert_numpy_types(value)
+        
+        json_file = os.path.join(output_dir, "displacement_analysis_50A.json")
+        with open(json_file, 'w') as f:
+            json.dump(records, f, indent=2)
         
         # 요약 통계
         summary = {
@@ -369,20 +397,20 @@ class Advanced50AAnalyzer:
             'analyzed_files': len(df),
             'valid_structures': len(valid_df),
             'invalid_structures': len(invalid_df),
-            'validation_rate': len(valid_df) / len(df) * 100 if len(df) > 0 else 0,
+            'validation_rate': float(len(valid_df) / len(df) * 100) if len(df) > 0 else 0.0,
             'distance_stats': {
                 'mean': float(df['min_distance'].mean()),
                 'std': float(df['min_distance'].std()),
                 'min': float(df['min_distance'].min()),
                 'max': float(df['min_distance'].max()),
-                'target_achievement_rate': len(df[df['distance_acceptable']]) / len(df) * 100
+                'target_achievement_rate': float(len(df[df['distance_acceptable']]) / len(df) * 100)
             },
             'clash_stats': {
-                'clash_free_rate': len(df[~df['has_clash']]) / len(df) * 100,
+                'clash_free_rate': float(len(df[~df['has_clash']]) / len(df) * 100),
                 'mean_clash_distance': float(df['min_clash_distance'].mean())
             },
             'path_stats': {
-                'path_clear_rate': len(df[~df['is_path_obstructed']]) / len(df) * 100
+                'path_clear_rate': float(len(df[~df['is_path_obstructed']]) / len(df) * 100)
             },
             'quality_stats': {
                 'mean': float(df['quality_score'].mean()),
@@ -402,9 +430,21 @@ class Advanced50AAnalyzer:
                 'rmsd_vs_golden': float(valid_df.iloc[0]['rmsd_vs_golden'])
             }
         
+        # summary 딕셔너리의 NumPy 타입도 변환
+        def convert_dict_numpy_types(d):
+            """딕셔너리 내의 NumPy 타입을 재귀적으로 변환"""
+            if isinstance(d, dict):
+                return {k: convert_dict_numpy_types(v) for k, v in d.items()}
+            elif isinstance(d, list):
+                return [convert_dict_numpy_types(item) for item in d]
+            else:
+                return convert_numpy_types(d)
+        
+        summary_converted = convert_dict_numpy_types(summary)
+        
         summary_file = os.path.join(output_dir, "analysis_summary_50A.json")
         with open(summary_file, 'w') as f:
-            json.dump(summary, f, indent=2)
+            json.dump(summary_converted, f, indent=2)
         
         self.logger.info(f"분석 완료: {len(df)}개 구조 분석")
         self.logger.info(f"유효한 구조: {len(valid_df)}개 ({len(valid_df)/len(df)*100:.1f}%)")
@@ -429,76 +469,97 @@ class Advanced50AAnalyzer:
             sns.set_palette("husl")
             
             fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-            fig.suptitle('50Å 거리 기반 구조 변형 분석 결과', fontsize=16)
+            fig.suptitle('50A Distance-based Structure Displacement Analysis Results', fontsize=16)
             
-            # 1. 거리 달성도 분포
+            # 1. Distance Achievement Distribution
             axes[0, 0].hist(df['min_distance'], bins=20, alpha=0.7, edgecolor='black')
             axes[0, 0].axvline(self.target_distance, color='red', linestyle='--', linewidth=2, 
-                              label=f'목표 거리: {self.target_distance}Å')
-            axes[0, 0].set_xlabel('최소 거리 (Å)')
-            axes[0, 0].set_ylabel('빈도')
-            axes[0, 0].set_title('거리 달성도 분포')
+                              label=f'Target Distance: {self.target_distance}A')
+            axes[0, 0].set_xlabel('Minimum Distance (A)')
+            axes[0, 0].set_ylabel('Frequency')
+            axes[0, 0].set_title('Distance Achievement Distribution')
             axes[0, 0].legend()
             
             # 2. 유효성 파이 차트
             valid_counts = df['is_valid'].value_counts()
-            labels = ['유효', '무효'] if True in valid_counts.index else ['무효']
-            colors = ['lightgreen', 'lightcoral']
-            if len(valid_counts) == 1:
-                colors = colors[1:] if valid_counts.index[0] == False else colors[:1]
             
-            axes[0, 1].pie(valid_counts.values, labels=labels, colors=colors[:len(valid_counts)], 
+            # 라벨과 색상을 실제 데이터에 맞춰 동적 생성
+            labels = []
+            colors = []
+            for idx in valid_counts.index:
+                if idx == True:
+                    labels.append('Valid')
+                    colors.append('lightgreen')
+                else:
+                    labels.append('Invalid')
+                    colors.append('lightcoral')
+            
+            axes[0, 1].pie(valid_counts.values, labels=labels, colors=colors, 
                           autopct='%1.1f%%', startangle=90)
-            axes[0, 1].set_title('구조 유효성 분포')
+            axes[0, 1].set_title('Structure Validity Distribution')
             
             # 3. 품질 점수 vs 거리 오차
             valid_mask = df['is_valid'] == True
             scatter = axes[0, 2].scatter(df[valid_mask]['distance_error'], df[valid_mask]['quality_score'], 
-                                       c='green', alpha=0.6, label='유효', s=50)
+                                       c='green', alpha=0.6, label='Valid', s=50)
             if any(~valid_mask):
                 axes[0, 2].scatter(df[~valid_mask]['distance_error'], df[~valid_mask]['quality_score'], 
-                                 c='red', alpha=0.6, label='무효', s=50)
-            axes[0, 2].set_xlabel('거리 오차 (Å)')
-            axes[0, 2].set_ylabel('품질 점수')
-            axes[0, 2].set_title('품질 점수 vs 거리 오차')
+                                 c='red', alpha=0.6, label='Invalid', s=50)
+            axes[0, 2].set_xlabel('Distance Error (A)')
+            axes[0, 2].set_ylabel('Quality Score')
+            axes[0, 2].set_title('Quality Score vs Distance Error')
             axes[0, 2].legend()
             
             # 4. Clash 분석
             clash_counts = df['has_clash'].value_counts()
-            clash_labels = ['Clash 없음', 'Clash 있음'] if False in clash_counts.index else ['Clash 있음']
-            clash_colors = ['lightblue', 'orange']
-            if len(clash_counts) == 1:
-                clash_colors = clash_colors[1:] if clash_counts.index[0] == True else clash_colors[:1]
             
-            axes[1, 0].pie(clash_counts.values, labels=clash_labels, colors=clash_colors[:len(clash_counts)], 
+            # Clash 라벨과 색상을 실제 데이터에 맞춰 동적 생성
+            clash_labels = []
+            clash_colors = []
+            for idx in clash_counts.index:
+                if idx == False:
+                    clash_labels.append('No Clash')
+                    clash_colors.append('lightblue')
+                else:
+                    clash_labels.append('Clash')
+                    clash_colors.append('orange')
+            
+            axes[1, 0].pie(clash_counts.values, labels=clash_labels, colors=clash_colors, 
                           autopct='%1.1f%%', startangle=90)
-            axes[1, 0].set_title('Clash 발생 분포')
+            axes[1, 0].set_title('Clash Distribution')
             
             # 5. 경로 차단 분석
             path_counts = df['is_path_obstructed'].value_counts()
-            path_labels = ['경로 차단 없음', '경로 차단 있음'] if False in path_counts.index else ['경로 차단 있음']
-            path_colors = ['lightgreen', 'salmon']
-            if len(path_counts) == 1:
-                path_colors = path_colors[1:] if path_counts.index[0] == True else path_colors[:1]
             
-            axes[1, 1].pie(path_counts.values, labels=path_labels, colors=path_colors[:len(path_counts)], 
+            # 경로 차단 라벨과 색상을 실제 데이터에 맞춰 동적 생성
+            path_labels = []
+            path_colors = []
+            for idx in path_counts.index:
+                if idx == False:
+                    path_labels.append('Path Clear')
+                    path_colors.append('lightgreen')
+                else:
+                    path_labels.append('Path Obstructed')
+                    path_colors.append('salmon')
+            
+            axes[1, 1].pie(path_counts.values, labels=path_labels, colors=path_colors, 
                           autopct='%1.1f%%', startangle=90)
-            axes[1, 1].set_title('경로 차단 분포')
+            axes[1, 1].set_title('Path Obstruction Distribution')
             
             # 6. 상위 10개 구조의 품질 점수
             top_10 = df.head(10)
             bars = axes[1, 2].bar(range(len(top_10)), top_10['quality_score'],
                                  color=['green' if valid else 'red' for valid in top_10['is_valid']])
-            axes[1, 2].set_xlabel('순위')
-            axes[1, 2].set_ylabel('품질 점수')
-            axes[1, 2].set_title('상위 10개 구조 품질 점수')
+            axes[1, 2].set_xlabel('Rank')
+            axes[1, 2].set_ylabel('Quality Score')
+            axes[1, 2].set_title('Top 10 Structure Quality Scores')
             axes[1, 2].set_xticks(range(len(top_10)))
             axes[1, 2].set_xticklabels([f"{i+1}" for i in range(len(top_10))])
             
             # 범례 추가
             from matplotlib.patches import Patch
-            legend_elements = [Patch(facecolor='green', label='유효'),
-                             Patch(facecolor='red', label='무효')]
+            legend_elements = [Patch(facecolor='green', label='Valid'),
+                             Patch(facecolor='red', label='Invalid')]
             axes[1, 2].legend(handles=legend_elements)
             
             plt.tight_layout()

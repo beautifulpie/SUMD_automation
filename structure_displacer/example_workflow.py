@@ -96,7 +96,9 @@ class Advanced50AWorkflowManager:
         displacement_config = DisplacementConfig()
         config_dict = self.merged_config['displacement_config']
         
-        displacement_config.target_distance = config_dict['target_distance']
+        displacement_config.actual_displacement_distance = 60.0  # 고정 거리 모드용 (사용안함)
+        displacement_config.target_distance_for_validation = 50.0  # 목표 표면간 거리
+        displacement_config.use_adaptive_displacement = True  # 적응형 거리 계산 사용
         displacement_config.clash_threshold = config_dict['clash_threshold']
         displacement_config.max_attempts = config_dict['max_attempts']
         displacement_config.path_check_threshold = config_dict['path_check_threshold']
@@ -544,6 +546,13 @@ def main():
     
     logger.info(f"이동할 체인: {target_chains[0]}, 고정된 체인: {target_chains[1]}")
     
+    # 출력 디렉토리 자동 생성
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir, exist_ok=True)
+        logger.info(f"출력 디렉토리 생성: {args.output_dir}")
+    else:
+        logger.info(f"기존 출력 디렉토리 사용: {args.output_dir}")
+        
     # 설정 준비
     config = {
         'num_variants': args.num_variants,
