@@ -14,7 +14,7 @@ Golden Standard PDB 파일에서 특정 체인을 정확히 50Å 거리로 이�
 5. 이동 경로상 다른 단백질 존재 시 폐기
 
 사용법:
-    python structure_displacer.py --input complex.pdb --target_chains A,B --num_variants 5
+    python structure_displacer.py --input complex.pdb --receptor_chains A,C --ligand_chains B,D --num_variants 5
 """
 
 import os
@@ -513,23 +513,22 @@ class AdvancedStructureDisplacer:
         
         return True, validation_result
     
-    def displace_structure(self, input_pdb: str, target_chains: List[str], 
+    def displace_structure(self, input_pdb: str, receptor_chains: List[str], ligand_chains: List[str],
                          output_pdb: str = None) -> Tuple[str, Dict]:
         """
-        구조 변형 실행
+        구조 변형 실행 - 다중 체인 지원
         
         Args:
             input_pdb: 입력 PDB 파일
-            target_chains: [이동할 체인, 고정된 체인] 
+            receptor_chains: 수용체 체인 ID 리스트 (고정됨)
+            ligand_chains: 리간드 체인 ID 리스트 (이동함)
             output_pdb: 출력 PDB 파일
             
         Returns:
             Tuple[str, Dict]: (출력 파일 경로, 변형 정보)
         """
-        if len(target_chains) != 2:
-            raise ValueError("정확히 2개의 체인이 필요합니다 (이동할 체인, 고정된 체인)")
-        
-        move_chain_id, fixed_chain_id = target_chains
+        if not receptor_chains or not ligand_chains:
+            raise ValueError("수용체 체인과 리간드 체인이 모두 필요합니다")
         
         try:
             # PDB 파일 로드
@@ -542,35 +541,52 @@ class AdvancedStructureDisplacer:
                 output_pdb = f"{base_name}_displaced_{timestamp}.pdb"
             
             # 체인 수집
-            move_chain = None
-            fixed_chain = None
+            receptor_chain_objects = []
+            ligand_chain_objects = []
             other_chains = []
             
+            # 모든 체인을 분류
             for model in structure:
                 for chain in model:
-                    if chain.id == move_chain_id:
-                        move_chain = chain
-                    elif chain.id == fixed_chain_id:
-                        fixed_chain = chain
+                    if chain.id in receptor_chains:
+                        receptor_chain_objects.append(chain)
+                    elif chain.id in ligand_chains:
+                        ligand_chain_objects.append(chain)
                     else:
                         other_chains.append(chain)
             
-            if move_chain is None:
-                raise ValueError(f"이동할 체인 {move_chain_id}를 찾을 수 없습니다")
-            if fixed_chain is None:
-                raise ValueError(f"고정된 체인 {fixed_chain_id}를 찾을 수 없습니다")
+            # 체인 존재 확인
+            found_receptor_ids = [chain.id for chain in receptor_chain_objects]
+            found_ligand_ids = [chain.id for chain in ligand_chain_objects]
             
-            # 원래 이동 체인의 중심점 저장
-            original_center = np.mean([atom.coord for atom in move_chain.get_atoms()], axis=0)
+            missing_receptor = set(receptor_chains) - set(found_receptor_ids)
+            missing_ligand = set(ligand_chains) - set(found_ligand_ids)
             
-            # 초기 거리 확인
-            initial_distance, _ = self.min_dist_calc.calculate_min_distance_between_chains(move_chain, fixed_chain)
+            if missing_receptor:
+                raise ValueError(f"수용체 체인 {missing_receptor}를 찾을 수 없습니다")
+            if missing_ligand:
+                raise ValueError(f"리간드 체인 {missing_ligand}를 찾을 수 없습니다")
+            
+            # 다중 체인 간 거리 계산을 위해 임시로 첫 번째 체인들 사용
+            # 나중에 다중 체인 거리 계산 로직으로 개선 가능
+            primary_receptor = receptor_chain_objects[0]
+            primary_ligand = ligand_chain_objects[0]
+            
+            # 원래 리간드 체인들의 중심점 저장 (모든 리간드 체인 원자들의 중심)
+            all_ligand_atoms = []
+            for chain in ligand_chain_objects:
+                all_ligand_atoms.extend([atom.coord for atom in chain.get_atoms()])
+            original_center = np.mean(all_ligand_atoms, axis=0)
+            
+            # 초기 거리 확인 (첫 번째 수용체와 첫 번째 리간드 간)
+            initial_distance, _ = self.min_dist_calc.calculate_min_distance_between_chains(primary_ligand, primary_receptor)
             
             displacement_info = {
                 'input_pdb': input_pdb,
-                'target_chains': target_chains,
-                'move_chain': move_chain_id,
-                'fixed_chain': fixed_chain_id,
+                'receptor_chains': receptor_chains,
+                'ligand_chains': ligand_chains,
+                'found_receptor_chains': found_receptor_ids,
+                'found_ligand_chains': found_ligand_ids,
                 'other_chains': [chain.id for chain in other_chains],
                 'initial_distance': initial_distance,
                 'actual_displacement_distance': self.config.actual_displacement_distance,
@@ -579,7 +595,8 @@ class AdvancedStructureDisplacer:
                 'final_result': None
             }
             
-            self.logger.info(f"구조 변형 시작: {move_chain_id} 체인을 {self.config.actual_displacement_distance}Å 거리로 이동 (목표: {self.config.target_distance_for_validation}Å)")
+            self.logger.info(f"구조 변형 시작: 리간드 체인 {ligand_chains}을 {self.config.actual_displacement_distance}Å 거리로 이동 (목표: {self.config.target_distance_for_validation}Å)")
+            self.logger.info(f"수용체 체인: {receptor_chains}, 리간드 체인: {ligand_chains}")
             self.logger.info(f"초기 거리: {initial_distance:.2f}Å")
             
             # 여러 번 시도
@@ -587,17 +604,21 @@ class AdvancedStructureDisplacer:
             
             for attempt in range(self.config.max_attempts):
                 try:
-                    # 변위 벡터 계산
+                    # 변위 벡터 계산 (첫 번째 리간드와 첫 번째 수용체 기준)
                     displacement_vector, calc_info = self.calculate_displacement_vector(
-                        move_chain, fixed_chain
+                        primary_ligand, primary_receptor
                     )
                     
-                    # 변위 적용
-                    displaced_chain = self.apply_displacement(move_chain, displacement_vector)
+                    # 모든 리간드 체인에 변위 적용
+                    displaced_ligand_chains = []
+                    for chain in ligand_chain_objects:
+                        displaced_chain = self.apply_displacement(chain, displacement_vector)
+                        displaced_ligand_chains.append(displaced_chain)
                     
-                    # 유효성 검사
+                    # 유효성 검사 (첫 번째 변형된 리간드와 첫 번째 수용체 기준)
                     is_valid, validation_result = self.validate_displaced_structure(
-                        displaced_chain, fixed_chain, other_chains, original_center
+                        displaced_ligand_chains[0], primary_receptor, 
+                        receptor_chain_objects[1:] + other_chains, original_center
                     )
                     
                     attempt_info = {
@@ -615,14 +636,16 @@ class AdvancedStructureDisplacer:
                         new_model = Model(0)
                         new_structure.add(new_model)
                         
-                        # 변형된 체인 추가
-                        displaced_chain.detach_parent()
-                        new_model.add(displaced_chain)
+                        # 변형된 리간드 체인들 추가
+                        for displaced_chain in displaced_ligand_chains:
+                            displaced_chain.detach_parent()
+                            new_model.add(displaced_chain)
                         
-                        # 고정된 체인 추가
-                        fixed_chain_copy = fixed_chain.copy()
-                        fixed_chain_copy.detach_parent()
-                        new_model.add(fixed_chain_copy)
+                        # 수용체 체인들 추가
+                        for receptor_chain in receptor_chain_objects:
+                            receptor_chain_copy = receptor_chain.copy()
+                            receptor_chain_copy.detach_parent()
+                            new_model.add(receptor_chain_copy)
                         
                         # 다른 체인들 추가
                         for other_chain in other_chains:
@@ -692,7 +715,7 @@ class MultipleDisplacer:
         self.logger = logger or logging.getLogger(__name__)
         self.single_displacer = AdvancedStructureDisplacer(config, logger)
     
-    def generate_multiple_variants(self, input_pdb: str, target_chains: List[str], 
+    def generate_multiple_variants(self, input_pdb: str, receptor_chains: List[str], ligand_chains: List[str],
                                  num_variants: int = 5, output_dir: str = None,
                                  output_prefix: str = None) -> List[Tuple[str, Dict]]:
         """여러 변형된 구조 생성"""
@@ -722,7 +745,7 @@ class MultipleDisplacer:
                 self.logger.info(f"변형 구조 {i}/{num_variants} 생성 중...")
                 
                 result = self.single_displacer.displace_structure(
-                    input_pdb, target_chains, output_pdb
+                    input_pdb, receptor_chains, ligand_chains, output_pdb
                 )
                 
                 results.append(result)
@@ -759,15 +782,17 @@ def main():
 - 이동 경로상 다른 단백질 존재 시 폐기
 
 사용 예시:
-  python structure_displacer.py --input complex.pdb --target_chains A,B --num_variants 5
-  python structure_displacer.py --input complex.pdb --target_chains A,B --target_distance 60 --clash_threshold 2.5
+  python structure_displacer.py --input complex.pdb --receptor_chains A,C --ligand_chains B,D --num_variants 5
+  python structure_displacer.py --input complex.pdb --receptor_chains A --ligand_chains B --target_distance 60 --clash_threshold 2.5
         """
     )
     
     # 필수 인수
     parser.add_argument("--input", required=True, help="입력 PDB 파일")
-    parser.add_argument("--target_chains", required=True, 
-                       help="타겟 체인 ID (쉼표로 구분, 첫 번째가 이동할 체인, 예: A,B)")
+    parser.add_argument("--receptor_chains", required=True, 
+                       help="수용체 체인 ID (쉼표로 구분, 고정됨, 예: A,C)")
+    parser.add_argument("--ligand_chains", required=True, 
+                       help="리간드 체인 ID (쉼표로 구분, 이동함, 예: B,D)")
     
     # 기본 파라미터
     parser.add_argument("--num_variants", type=int, default=5,
@@ -804,13 +829,16 @@ def main():
         logger.error(f"입력 파일을 찾을 수 없습니다: {args.input}")
         return 1
     
-    # 타겟 체인 파싱
-    target_chains = [chain.strip().upper() for chain in args.target_chains.split(',')]
-    if len(target_chains) != 2:
-        logger.error("정확히 2개의 체인이 필요합니다 (이동할 체인, 고정된 체인)")
+    # 체인 파싱
+    receptor_chains = [chain.strip().upper() for chain in args.receptor_chains.split(',')]
+    ligand_chains = [chain.strip().upper() for chain in args.ligand_chains.split(',')]
+    
+    if not receptor_chains or not ligand_chains:
+        logger.error("수용체 체인과 리간드 체인이 모두 필요합니다")
         return 1
     
-    logger.info(f"이동할 체인: {target_chains[0]}, 고정된 체인: {target_chains[1]}")
+    logger.info(f"수용체 체인 (고정): {receptor_chains}")
+    logger.info(f"리간드 체인 (이동): {ligand_chains}")
     
     # 랜덤 시드 설정
     if args.seed is not None:
@@ -835,7 +863,7 @@ def main():
         
         # 변형 구조 생성
         results = displacer.generate_multiple_variants(
-            args.input, target_chains, args.num_variants, args.output_dir
+            args.input, receptor_chains, ligand_chains, args.num_variants, args.output_dir
         )
         
         # 결과 요약

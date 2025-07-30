@@ -10,7 +10,7 @@
 4. 선택된 구조로 SuMD 시뮬레이션 실행
 
 사용법:
-    python example_workflow.py --golden_standard native_complex.pdb --target_chains A,B --num_variants 5
+    python example_workflow.py --golden_standard native_complex.pdb --receptor_chains A,C --ligand_chains B,D --num_variants 5
 """
 
 import os
@@ -74,14 +74,15 @@ class Advanced50AWorkflowManager:
                 merged[key] = value
         return merged
     
-    def step1_generate_50A_displaced_structures(self, golden_standard: str, target_chains: List[str], 
+    def step1_generate_50A_displaced_structures(self, golden_standard: str, receptor_chains: List[str], ligand_chains: List[str],
                                               output_dir: str) -> List[Tuple[str, Dict]]:
         """
         단계 1: 50Å 거리 기반 변형된 구조들 생성
         
         Args:
             golden_standard: Golden Standard PDB 파일
-            target_chains: [이동할 체인, 고정된 체인]
+            receptor_chains: 수용체 체인 ID 리스트 (고정됨)
+            ligand_chains: 리간드 체인 ID 리스트 (이동함)
             output_dir: 출력 디렉토리
             
         Returns:
@@ -89,8 +90,8 @@ class Advanced50AWorkflowManager:
         """
         self.logger.info("=== 단계 1: 50Å 거리 기반 변형된 구조 생성 ===")
         
-        if len(target_chains) != 2:
-            raise ValueError("정확히 2개의 체인이 필요합니다")
+        if not receptor_chains or not ligand_chains:
+            raise ValueError("수용체 체인과 리간드 체인이 모두 필요합니다")
         
         # 변형 설정 생성
         displacement_config = DisplacementConfig()
@@ -110,7 +111,8 @@ class Advanced50AWorkflowManager:
         displaced_dir = os.path.join(output_dir, "displaced_structures_50A")
         results = displacer.generate_multiple_variants(
             golden_standard, 
-            target_chains,
+            receptor_chains,
+            ligand_chains,
             self.merged_config['num_variants'],
             displaced_dir
         )
@@ -134,14 +136,15 @@ class Advanced50AWorkflowManager:
         return results
     
     def step2_analyze_50A_displacement_quality(self, golden_standard: str, displaced_results: List[Tuple[str, Dict]],
-                                             target_chains: List[str], output_dir: str) -> Tuple[str, Dict]:
+                                             receptor_chains: List[str], ligand_chains: List[str], output_dir: str) -> Tuple[str, Dict]:
         """
         단계 2: 50Å 변형 품질 분석
         
         Args:
             golden_standard: Golden Standard PDB 파일
             displaced_results: 변형된 구조 결과들
-            target_chains: 타겟 체인 리스트
+            receptor_chains: 수용체 체인 ID 리스트
+            ligand_chains: 리간드 체인 ID 리스트
             output_dir: 출력 디렉토리
             
         Returns:
@@ -165,8 +168,9 @@ class Advanced50AWorkflowManager:
         target_distance = self.merged_config['displacement_config']['target_distance']
         analyzer = Advanced50AAnalyzer(target_distance, self.logger)
         
-        # 품질 분석 실행
+        # 품질 분석 실행 (호환성을 위해 첫 번째 수용체와 첫 번째 리간드 사용)
         analysis_dir = os.path.join(output_dir, "quality_analysis_50A")
+        target_chains = [receptor_chains[0], ligand_chains[0]]  # 분석용 대표 체인
         df = analyzer.analyze_batch_structures(
             golden_standard, displaced_files, target_chains, analysis_dir
         )
@@ -260,14 +264,15 @@ class Advanced50AWorkflowManager:
         return best_file, analysis_summary
     
     def step3_run_sumd_simulation(self, displaced_structure: str, golden_standard: str,
-                                target_chains: List[str], output_dir: str) -> Dict:
+                                receptor_chains: List[str], ligand_chains: List[str], output_dir: str) -> Dict:
         """
         단계 3: SuMD 시뮬레이션 실행
         
         Args:
             displaced_structure: 변형된 구조 파일 (시작점)
             golden_standard: Golden Standard 파일 (목표점)
-            target_chains: 타겟 체인 리스트
+            receptor_chains: 수용체 체인 ID 리스트
+            ligand_chains: 리간드 체인 ID 리스트
             output_dir: 출력 디렉토리
             
         Returns:
@@ -275,8 +280,8 @@ class Advanced50AWorkflowManager:
         """
         self.logger.info("=== 단계 3: SuMD 시뮬레이션 실행 ===")
         
-        if len(target_chains) != 2:
-            raise ValueError("정확히 2개의 체인이 필요합니다")
+        if not receptor_chains or not ligand_chains:
+            raise ValueError("수용체 체인과 리간드 체인이 모두 필요합니다")
         
         sumd_config = self.merged_config['sumd_config']
         sumd_output_dir = os.path.join(output_dir, "sumd_simulation_50A")
@@ -306,8 +311,8 @@ class Advanced50AWorkflowManager:
             "--input_pdb", displaced_structure,
             "--output_dir", sumd_output_dir,
             "--simulation_time", str(sumd_config['simulation_time']),
-            "--receptor_chain", target_chains[0],
-            "--ligand_chain", target_chains[1],
+            "--receptor_chain", receptor_chains[0],  # 첫 번째 수용체 체인 사용
+            "--ligand_chain", ligand_chains[0],      # 첫 번째 리간드 체인 사용
             "--distance_threshold", str(sumd_config['distance_threshold']),
             "--rmsd_threshold", str(sumd_config['rmsd_threshold']),
             "--max_iterations", str(sumd_config['max_iterations']),
@@ -386,14 +391,15 @@ class Advanced50AWorkflowManager:
         
         return simulation_result
     
-    def run_complete_50A_workflow(self, golden_standard: str, target_chains: List[str], 
+    def run_complete_50A_workflow(self, golden_standard: str, receptor_chains: List[str], ligand_chains: List[str],
                                 output_dir: str) -> Dict:
         """
         전체 50Å 기반 워크플로우 실행
         
         Args:
             golden_standard: Golden Standard PDB 파일
-            target_chains: [이동할 체인, 고정된 체인]
+            receptor_chains: 수용체 체인 ID 리스트
+            ligand_chains: 리간드 체인 ID 리스트
             output_dir: 출력 디렉토리
             
         Returns:
@@ -405,7 +411,8 @@ class Advanced50AWorkflowManager:
             'workflow_type': '50A_distance_based',
             'start_time': datetime.now().isoformat(),
             'golden_standard': golden_standard,
-            'target_chains': target_chains,
+            'receptor_chains': receptor_chains,
+            'ligand_chains': ligand_chains,
             'config': self.merged_config,
             'steps': {}
         }
@@ -413,7 +420,7 @@ class Advanced50AWorkflowManager:
         try:
             # 단계 1: 50Å 변형 구조 생성
             displaced_results = self.step1_generate_50A_displaced_structures(
-                golden_standard, target_chains, output_dir
+                golden_standard, receptor_chains, ligand_chains, output_dir
             )
             
             successful_structures = [r for r in displaced_results if r[1]['final_result']['success']]
@@ -432,7 +439,7 @@ class Advanced50AWorkflowManager:
             
             # 단계 2: 품질 분석
             best_structure, analysis_summary = self.step2_analyze_50A_displacement_quality(
-                golden_standard, displaced_results, target_chains, output_dir
+                golden_standard, displaced_results, receptor_chains, ligand_chains, output_dir
             )
             workflow_result['steps']['analysis'] = {
                 'success': True,
@@ -442,7 +449,7 @@ class Advanced50AWorkflowManager:
             
             # 단계 3: SuMD 시뮬레이션
             simulation_result = self.step3_run_sumd_simulation(
-                best_structure, golden_standard, target_chains, output_dir
+                best_structure, golden_standard, receptor_chains, ligand_chains, output_dir
             )
             workflow_result['steps']['simulation'] = simulation_result
             
@@ -481,15 +488,17 @@ def main():
 - 유효한 구조들 중에서 최고 품질 선택
 
 사용 예시:
-  python example_workflow.py --golden_standard native_complex.pdb --target_chains A,B --num_variants 5
+  python example_workflow.py --golden_standard native_complex.pdb --receptor_chains A,C --ligand_chains B,D --num_variants 5
         """
     )
     
     # 필수 인수
     parser.add_argument("--golden_standard", required=True,
                        help="Golden Standard PDB 파일")
-    parser.add_argument("--target_chains", required=True,
-                       help="타겟 체인 ID (쉼표로 구분, 첫 번째가 이동할 체인, 예: A,B)")
+    parser.add_argument("--receptor_chains", required=True,
+                       help="수용체 체인 ID (쉼표로 구분, 고정됨, 예: A,C)")
+    parser.add_argument("--ligand_chains", required=True,
+                       help="리간드 체인 ID (쉼표로 구분, 이동함, 예: B,D)")
     
     # 워크플로우 설정
     parser.add_argument("--num_variants", type=int, default=5,
@@ -538,13 +547,16 @@ def main():
         logger.error(f"Golden Standard 파일을 찾을 수 없습니다: {args.golden_standard}")
         return 1
     
-    # 타겟 체인 파싱
-    target_chains = [chain.strip().upper() for chain in args.target_chains.split(',')]
-    if len(target_chains) != 2:
-        logger.error("정확히 2개의 체인이 필요합니다 (이동할 체인, 고정된 체인)")
+    # 체인 파싱
+    receptor_chains = [chain.strip().upper() for chain in args.receptor_chains.split(',')]
+    ligand_chains = [chain.strip().upper() for chain in args.ligand_chains.split(',')]
+    
+    if not receptor_chains or not ligand_chains:
+        logger.error("수용체 체인과 리간드 체인이 모두 필요합니다")
         return 1
     
-    logger.info(f"이동할 체인: {target_chains[0]}, 고정된 체인: {target_chains[1]}")
+    logger.info(f"수용체 체인 (고정): {receptor_chains}")
+    logger.info(f"리간드 체인 (이동): {ligand_chains}")
     
     # 출력 디렉토리 자동 생성
     if not os.path.exists(args.output_dir):
@@ -588,11 +600,11 @@ def main():
             
             # 단계 1, 2만 실행
             displaced_results = workflow_manager.step1_generate_50A_displaced_structures(
-                args.golden_standard, target_chains, args.output_dir
+                args.golden_standard, receptor_chains, ligand_chains, args.output_dir
             )
             
             best_structure, analysis_summary = workflow_manager.step2_analyze_50A_displacement_quality(
-                args.golden_standard, displaced_results, target_chains, args.output_dir
+                args.golden_standard, displaced_results, receptor_chains, ligand_chains, args.output_dir
             )
             
             result = {
@@ -604,7 +616,7 @@ def main():
             }
         else:
             result = workflow_manager.run_complete_50A_workflow(
-                args.golden_standard, target_chains, args.output_dir
+                args.golden_standard, receptor_chains, ligand_chains, args.output_dir
             )
         
         # 결과 요약 출력

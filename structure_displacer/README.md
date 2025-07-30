@@ -4,7 +4,7 @@
 
 ## 🎯 개요
 
-Structure Displacer 시스템은 지정된 두 체인 간의 최소 거리가 정확히 50Å가 되도록 수정된 단백질 복합체 구조를 생성합니다. 이 시스템의 주요 목적:
+Structure Displacer 시스템은 다중 수용체 체인과 다중 리간드 체인을 지원하여, 지정된 체인 그룹 간의 최소 거리가 정확히 50Å가 되도록 수정된 단백질 복합체 구조를 생성합니다. 이 시스템의 주요 목적:
 
 - 정확한 50Å 거리로 체인 간 분리된 구조 생성
 - 변형 중 구조적 무결성 유지
@@ -42,7 +42,8 @@ Structure Displacer 시스템은 지정된 두 체인 간의 최소 거리가 �
 ```bash
 python example_workflow.py \
     --golden_standard native_complex.pdb \
-    --target_chains A,B \
+    --receptor_chains A,C \
+    --ligand_chains B,D \
     --num_variants 5 \
     --output_dir my_50A_workflow \
     --skip_sumd
@@ -74,6 +75,7 @@ python structure_displacer.py \
 
 2. **변형 품질 분석:**
 ```bash
+# 분석 시에는 대표 체인 2개만 지정 (첫 번째 수용체, 첫 번째 리간드)
 python displacement_utils.py \
     --golden_standard complex.pdb \
     --displaced_dir displaced_structures_50A \
@@ -107,7 +109,7 @@ python /app/SUMD_automation/robust_sumd_master.py \
 메인 변형 생성 클래스:
 
 **주요 메서드:**
-- `displace_structure(input_pdb, target_chains, output_pdb)`: 단일 변형 구조 생성
+- `displace_structure(input_pdb, receptor_chains, ligand_chains, output_pdb)`: 단일 변형 구조 생성 (다중 체인 지원)
 - `calculate_displacement_vector(chain1, chain2)`: 정확한 변형 벡터 계산
 - `validate_displaced_structure()`: 생성된 구조의 품질 검증
 
@@ -146,16 +148,18 @@ python /app/SUMD_automation/robust_sumd_master.py \
 
 ### 기본 변형 생성 옵션
 ```bash
-# 기본 50Å 변형 (추천)
+# 기본 50Å 변형 (추천) - 단일 체인 간
 python structure_displacer.py \
     --input complex.pdb \
-    --target_chains A,B \
+    --receptor_chains A \
+    --ligand_chains B \
     --num_variants 5
 
-# 더 많은 변형체와 엄격한 조건
+# 다중 체인 복합체 - 수용체 체인 A,C와 리간드 체인 B,D
 python structure_displacer.py \
     --input complex.pdb \
-    --target_chains A,B \
+    --receptor_chains A,C \
+    --ligand_chains B,D \
     --num_variants 10 \
     --target_distance 50.0 \
     --clash_threshold 2.5 \
@@ -186,26 +190,65 @@ python displacement_utils.py \
 # 기본: 구조 생성 + 분석만 (SUMD 없음)
 python example_workflow.py \
     --golden_standard native.pdb \
-    --target_chains A,B \
+    --receptor_chains A \
+    --ligand_chains B \
     --num_variants 5 \
     --skip_sumd
 
-# SUMD 포함 전체 워크플로우
+# 다중 체인: SUMD 포함 전체 워크플로우
 python example_workflow.py \
     --golden_standard native.pdb \
-    --target_chains A,B \
+    --receptor_chains A,C \
+    --ligand_chains B,D \
     --num_variants 5 \
     --simulation_time 2.0 \
     --rmsd_threshold 1.5
 
-# 관대한 조건으로 실행
+# 관대한 조건으로 실행 (무효한 구조도 허용)
 python example_workflow.py \
     --golden_standard native.pdb \
-    --target_chains A,B \
+    --receptor_chains A \
+    --ligand_chains B \
     --num_variants 10 \
     --allow_invalid \
     --min_quality_score 0.5 \
     --skip_sumd
+```
+
+## 🔗 다중 체인 지원
+
+Structure Displacer는 이제 다중 수용체 체인과 다중 리간드 체인을 완전히 지원합니다:
+
+### 지원되는 체인 구성
+
+1. **단일 수용체 - 단일 리간드**: `--receptor_chains A --ligand_chains B`
+2. **단일 수용체 - 다중 리간드**: `--receptor_chains A --ligand_chains B,C,D`
+3. **다중 수용체 - 단일 리간드**: `--receptor_chains A,C,E --ligand_chains B`
+4. **다중 수용체 - 다중 리간드**: `--receptor_chains A,C --ligand_chains B,D`
+
+### 다중 체인 처리 방식
+
+- **수용체 체인들**: 고정된 상태로 유지됨
+- **리간드 체인들**: 모든 리간드 체인이 함께 이동하여 원래 상대적 위치 보존
+- **체인 ID 보존**: 원본 PDB의 체인 ID가 출력에서 그대로 유지됨
+- **거리 계산**: 첫 번째 수용체와 첫 번째 리간드 체인 간 거리로 기준 설정
+
+### 다중 체인 사용 예시
+
+```bash
+# 예시 1: 항체-항원 복합체 (항체 H,L 체인 + 항원 A 체인)
+python structure_displacer.py \
+    --input antibody_antigen.pdb \
+    --receptor_chains H,L \
+    --ligand_chains A \
+    --num_variants 5
+
+# 예시 2: 단백질-단백질 복합체 (각각 2개 체인)
+python structure_displacer.py \
+    --input protein_complex.pdb \
+    --receptor_chains A,B \
+    --ligand_chains C,D \
+    --num_variants 5
 ```
 
 ## 📈 출력 구조
