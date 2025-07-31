@@ -156,13 +156,15 @@ class GromacsCommandRunner:
                 check=False  # 중요: GROMACS 경고를 오류로 보지 않음
             )
             
+            # stderr은 항상 디코딩하여 로그 및 오류 메시지에 활용
+            stderr_text = result.stderr.decode('utf-8', errors='ignore')
+
             # 로그 출력
             if result.stdout:
                 stdout_text = result.stdout.decode('utf-8', errors='ignore')
                 self.logger.debug(f"STDOUT: {stdout_text[:500]}")
             
             if result.stderr:
-                stderr_text = result.stderr.decode('utf-8', errors='ignore')
                 self.logger.debug(f"STDERR: {stderr_text[:500]}")
             
             # 성공 여부 판정: 파일 존재 여부로 판단 (returncode 무시)
@@ -172,7 +174,8 @@ class GromacsCommandRunner:
                     self.logger.info(f"명령어 성공: 출력 파일 확인됨")
                     return True, "성공"
                 else:
-                    error_msg = f"출력 파일 누락: {missing}"
+                    # 실패 시 GROMACS의 stderr 내용을 함께 반환하여 원인 파악을 돕는다.
+                    error_msg = f"출력 파일 누락: {missing}. GROMACS 오류: {stderr_text[:200].strip()}"
                     self.logger.error(error_msg)
                     return False, error_msg
             else:
@@ -180,7 +183,8 @@ class GromacsCommandRunner:
                 if result.returncode == 0:
                     return True, "성공"
                 else:
-                    error_msg = f"명령어 실행 실패 (코드: {result.returncode})"
+                    error_msg = f"명령어 실행 실패 (코드: {result.returncode}). GROMACS 오류: {stderr_text[:200].strip()}"
+                    self.logger.error(error_msg)
                     return False, error_msg
                     
         except subprocess.TimeoutExpired:

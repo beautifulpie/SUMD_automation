@@ -311,56 +311,115 @@ def save_iteration_results(iteration_num, best_sample_result, all_sample_results
 # ===== 기존 run_single_sample 함수 유지 (수정 없음) =====
 def run_single_sample(sample_id, base_dir, processed_pdb, simulation_time, receptor_chain, ligand_chain, 
                      distance_threshold, logger, system_size="medium", config_file=None):
-    """단일 샘플 시뮬레이션 실행 - 기존 코드 그대로 유지"""
-    # [기존 코드 전체 유지 - 생략]
+    """단일 샘플 시뮬레이션 실행 - GROMACS 단계별 성공 여부 확인 로직 추가"""
     sample_dir = os.path.join(base_dir, f"sample_{sample_id}")
     os.makedirs(sample_dir, exist_ok=True)
     
     logger.info(f"샘플 {sample_id} 시작 (시스템 크기: {system_size})")
     
+    # 실패 시 반환할 기본 딕셔너리
+    failure_result = {
+        'sample_id': sample_id, 'initial_distance': float('inf'), 'final_distance': float('inf'),
+        'final_pdb': None, 'simulation_type': 'failed', 'sample_dir': sample_dir,
+        'success': False, 'error': 'Unknown error'
+    }
+
     try:
-        # 필요한 파일들 복사
         input_pdb_path = os.path.join(sample_dir, "input.pdb")
         shutil.copy(processed_pdb, input_pdb_path)
         
-        # MDP 파일들 생성
         MDPGenerator.generate_em_mdp(os.path.join(sample_dir, "em.mdp"), simulation_time, system_size)
         MDPGenerator.generate_ions_mdp(os.path.join(sample_dir, "ions.mdp"), simulation_time)
         MDPGenerator.generate_md_mdp(os.path.join(sample_dir, "md.mdp"), simulation_time)
         
-        initial_distance = DistanceCalculator.calculate_chain_distance(
-            processed_pdb, receptor_chain, ligand_chain
-        )
-        
-        # GROMACS Runner 생성
+        initial_distance = DistanceCalculator.calculate_chain_distance(processed_pdb, receptor_chain, ligand_chain)
+        failure_result['initial_distance'] = initial_distance
+
         runner = GromacsCommandRunner(sample_dir, config_file, logger, system_size)
         
-        # 시스템 준비 및 시뮬레이션 실행 (기존 로직 유지)
-        # ... (중략 - 기존 코드와 동일)
+        # --- GROMACS 파이프라인 시작 ---
+        # 1. pdb2gmx
+        success, msg = runner.try_multiple_force_fields({"input_pdb": "input.pdb", "output_gro": "processed.gro", "output_top": "topol.top"})
+        if not success:
+            failure_result['error'] = f"pdb2gmx 실패: {msg}"
+            return failure_result
+
+        # 2. editconf
+        success, msg = runner.execute_gromacs_command("editconf", {"input_gro": "processed.gro", "output_gro": "boxed.gro"})
+        if not success:
+            failure_result['error'] = f"editconf 실패: {msg}"
+            return failure_result
+
+        # 3. solvate
+        success, msg = runner.execute_gromacs_command("solvate", {"input_gro": "boxed.gro", "output_gro": "solvated.gro", "topology": "topol.top"})
+        if not success:
+            failure_result['error'] = f"solvate 실패: {msg}"
+            return failure_result
+
+        # 4. grompp (ions)
+        success, msg = runner.execute_gromacs_command("grompp_ions", {"mdp_file": "ions.mdp", "input_gro": "solvated.gro", "topology": "topol.top", "output_tpr": "ions.tpr"})
+        if not success:
+            failure_result['error'] = f"grompp_ions 실패: {msg}"
+            return failure_result
+
+        # 5. genion
+        success, msg = runner.execute_gromacs_command("genion", {"input_tpr": "ions.tpr", "output_gro": "neutral.gro", "topology": "topol.top"}, max_retries=2)
+        if not success:
+            failure_result['error'] = f"genion 실패: {msg}"
+            return failure_result
+
+        # --- 시뮬레이션 실행 ---
+        simulation_type = "EM+MD" if initial_distance <= distance_threshold else "EM_only"
         
-        # 임시로 성공 결과 반환 (실제로는 전체 로직 필요)
+        # 6. grompp (EM)
+        success, msg = runner.execute_gromacs_command("grompp_simulation", {"mdp_file": "em.mdp", "input_gro": "neutral.gro", "topology": "topol.top", "output_tpr": "em.tpr"})
+        if not success:
+            failure_result['error'] = f"grompp_em 실패: {msg}"
+            return failure_result
+
+        # 7. mdrun (EM)
+        success, msg = runner.execute_gromacs_command("mdrun_em", {"prefix": "em"})
+        if not success:
+            failure_result['error'] = f"mdrun_em 실패: {msg}"
+            return failure_result
+
+        final_pdb_path = os.path.join(sample_dir, "em.gro") # 우선 EM 결과 사용
+
+        if simulation_type == "EM+MD":
+            # 8. grompp (MD)
+            success, msg = runner.execute_gromacs_command("grompp_simulation", {"mdp_file": "md.mdp", "input_gro": "em.gro", "topology": "topol.top", "output_tpr": "md.tpr"})
+            if not success:
+                failure_result['error'] = f"grompp_md 실패: {msg}"
+                return failure_result
+            
+            # 9. mdrun (MD)
+            success, msg = runner.execute_gromacs_command("mdrun_md", {"prefix": "md"})
+            if not success:
+                failure_result['error'] = f"mdrun_md 실패: {msg}"
+                return failure_result
+            final_pdb_path = os.path.join(sample_dir, "md.gro")
+
+        # 최종 결과 파일 확인 및 거리 계산
+        if not os.path.exists(final_pdb_path):
+            failure_result['error'] = f"최종 결과 파일 누락: {final_pdb_path}"
+            return failure_result
+
+        final_distance = DistanceCalculator.calculate_chain_distance(final_pdb_path, receptor_chain, ligand_chain)
+
+        # 성공 결과 반환
+        result_pdb_path = os.path.join(sample_dir, f"result_{sample_id}.pdb")
+        shutil.copy(final_pdb_path, result_pdb_path) # 최종 파일을 일관된 이름으로 복사
+
         return {
-            'sample_id': sample_id,
-            'initial_distance': initial_distance,
-            'final_distance': initial_distance - 0.5,  # 임시값
-            'final_pdb': os.path.join(sample_dir, f"result_{sample_id}.pdb"),
-            'simulation_type': 'EM+MD',
-            'sample_dir': sample_dir,
+            'sample_id': sample_id, 'initial_distance': initial_distance, 'final_distance': final_distance,
+            'final_pdb': result_pdb_path, 'simulation_type': simulation_type, 'sample_dir': sample_dir,
             'success': True
         }
-    
+
     except Exception as e:
         logger.error(f"샘플 {sample_id} 실패: {e}")
-        return {
-            'sample_id': sample_id,
-            'initial_distance': float('inf'),
-            'final_distance': float('inf'),
-            'final_pdb': None,
-            'simulation_type': 'failed',
-            'sample_dir': sample_dir,
-            'success': False,
-            'error': str(e)
-        }
+        failure_result['error'] = str(e)
+        return failure_result
 
 # ===== 기존 다중 샘플 실행 함수 유지 =====
 def run_multi_sample_iteration_with_results_saving(processed_pdb, iter_dir, simulation_time, receptor_chain, ligand_chain, 

@@ -76,7 +76,6 @@ class InterfaceDistanceCalculator:
                 
                 self._log_warning(f"Interface residue가 부족합니다 (체인 {chain1_id}: {len(interface1_residues)}, "
                                  f"체인 {chain2_id}: {len(interface2_residues)}). Center of mass 방식으로 fallback.")
-                
                 return self._calculate_center_of_mass_distance(chain1_atoms, chain2_atoms)
             
             # Interface 기반 거리 계산

@@ -162,10 +162,10 @@ echo "=========================================="
 
 # Python 스크립트 경로 확인
 PYTHON_SCRIPT=""
-if [ -f "/app/scripts/robust_sumd_master.py" ]; then
-    PYTHON_SCRIPT="/app/scripts/robust_sumd_master.py"
+if [ -f "/app/SUMD_automation/robust_sumd_master.py" ]; then
+    PYTHON_SCRIPT="/app/SUMD_automation/robust_sumd_master.py"
 else
-    echo "오류: sumd_master 스크립트를 찾을 수 없습니다."
+    echo "오류: /app/SUMD_automation/robust_sumd_master.py 스크립트를 찾을 수 없습니다."
     exit 1
 fi
 
@@ -202,6 +202,7 @@ RESULT=$(python3 "$PYTHON_SCRIPT" \
     --max_iterations "$MAX_ITERATIONS" \
     --num_samples "$NUM_SAMPLES" \
     --job_id "$JOB_ID" \
+    --config_file /app/SUMD_automation/gromacs_commands_config.json \
     $SKIP_PREPROCESSING_FLAG 2>&1 | grep "SUMD_RESULT:")
 
 
