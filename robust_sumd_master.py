@@ -404,6 +404,20 @@ def run_single_sample(sample_id, base_dir, processed_pdb, simulation_time, recep
             failure_result['error'] = f"최종 결과 파일 누락: {final_pdb_path}"
             return failure_result
 
+        # === 새로 추가: GRO 파일을 PDB로 변환 ===
+        if final_pdb_path.endswith('.gro'):
+            pdb_path = final_pdb_path.replace('.gro', '.pdb')
+            success, msg = runner.execute_gromacs_command("convert_to_pdb", {
+                "input_gro": os.path.basename(final_pdb_path),
+                "output_pdb": os.path.basename(pdb_path)
+            })
+            runner.logger.info(msg)
+            if not success:
+                failure_result['error'] = f"PDB 변환 실패: {msg}"
+                return failure_result
+            
+            final_pdb_path = pdb_path
+
         final_distance = DistanceCalculator.calculate_chain_distance(final_pdb_path, receptor_chain, ligand_chain)
 
         # 성공 결과 반환

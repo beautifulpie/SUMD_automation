@@ -185,7 +185,7 @@ START_TIME=$(date +%s)
 
 # 전처리 건너뛰기 옵션 처리
 SKIP_PREPROCESSING_FLAG=""
-if [ "$SKIP_PREPROCESSING" = "true" ] || [ "$SKIP_PREPROCESSING" = "True" ] || [ "$SKIP_PREPROCESSING" = "1" ]; then
+if [[ "${SKIP_PREPROCESSING,,}" =~ ^(true|1|yes)$ ]]; then
     SKIP_PREPROCESSING_FLAG="--skip_preprocessing"
 fi
 

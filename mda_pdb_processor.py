@@ -8,8 +8,16 @@ from Bio.PDB import PDBParser, PDBIO, Select
 from Bio.PDB.Atom import Atom
 from typing import List, Optional, Tuple
 
+# 새로운 PDB Fixer import
+try:
+    from improved_pdb_fixer import fix_pdb_for_gromacs, GromacsCompatibleProcessor
+    ADVANCED_FIXER_AVAILABLE = True
+except ImportError:
+    ADVANCED_FIXER_AVAILABLE = False
+    print("경고: improved_pdb_fixer 모듈을 찾을 수 없습니다. 기본 처리기를 사용합니다.")
+
 class AdvancedPDBProcessor:
-    """MDAnalysis를 중심으로 한 고급 PDB 전처리 클래스"""
+    """MDAnalysis를 중심으로 한 고급 PDB 전처리 클래스 - 개선된 버전"""
     
     def __init__(self, logger=None):
         self.logger = logger or logging.getLogger(__name__)
@@ -22,10 +30,10 @@ class AdvancedPDBProcessor:
         # 각 아미노산의 필수 백본 원자
         self.required_backbone = {'N', 'CA', 'C', 'O'}
         
-        # 중요한 사이드체인 원자들 (누락되면 문제가 되는 것들)
+        # 개선된 중요한 사이드체인 원자들 (GROMACS 오류 방지)
         self.critical_sidechain = {
-            'GLN': {'CB', 'CG'},
-            'GLU': {'CB', 'CG'},
+            'GLN': {'CB', 'CG', 'CD'},      # CD 원자 필수!
+            'GLU': {'CB', 'CG', 'CD'},      # CD 원자 필수!
             'ARG': {'CB', 'CG', 'CD'},
             'LYS': {'CB', 'CG', 'CD'},
             'ASN': {'CB', 'CG'},
@@ -47,7 +55,7 @@ class AdvancedPDBProcessor:
     def process_pdb_pipeline(self, input_pdb: str, output_pdb: str, 
                            target_chains: List[str]) -> Tuple[str, dict]:
         """
-        완전한 PDB 전처리 파이프라인
+        완전한 PDB 전처리 파이프라인 - GROMACS 호환성 강화
         
         Args:
             input_pdb: 입력 PDB 파일 경로
@@ -57,7 +65,7 @@ class AdvancedPDBProcessor:
         Returns:
             tuple: (처리된 파일 경로, 처리 통계)
         """
-        self.logger.info(f"=== PDB 전처리 파이프라인 시작 ===")
+        self.logger.info(f"=== 개선된 PDB 전처리 파이프라인 시작 ===")
         self.logger.info(f"입력 파일: {input_pdb}")
         self.logger.info(f"대상 체인: {target_chains}")
         
@@ -68,16 +76,36 @@ class AdvancedPDBProcessor:
             'final_residues': 0,
             'removed_residues': [],
             'processed_cysteines': 0,
-            'processing_method': None
+            'processing_method': None,
+            'gromacs_ready': False
         }
         
-        # 1단계: 기본 전처리 (MDAnalysis 우선)
+        # 1단계: 고급 PDB 수정 (GROMACS 호환성 우선)
         temp_pdb1 = f"{output_pdb}.temp1"
-        processed_pdb = self._process_with_mdanalysis(input_pdb, temp_pdb1, target_chains, stats)
         
-        if not processed_pdb:
-            self.logger.warning("MDAnalysis 실패, Bio.PDB로 fallback")
-            processed_pdb = self._process_with_biopdb(input_pdb, temp_pdb1, target_chains, stats)
+        if ADVANCED_FIXER_AVAILABLE:
+            try:
+                self.logger.info("고급 PDB Fixer로 GROMACS 호환성 확보 중...")
+                processed_pdb, fix_stats = fix_pdb_for_gromacs(
+                    input_pdb, temp_pdb1, target_chains, self.logger
+                )
+                
+                # 통계 업데이트
+                stats.update(fix_stats)
+                stats['processing_method'] = 'Advanced_GROMACS_Fixer'
+                
+                if fix_stats.get('gromacs_ready', False):
+                    self.logger.info("고급 PDB Fixer로 GROMACS 호환성 확보 완료")
+                else:
+                    self.logger.warning("고급 PDB Fixer 완료되었지만 일부 문제 남아있음")
+                    
+            except Exception as e:
+                self.logger.error(f"고급 PDB Fixer 실패: {e}")
+                self.logger.info("기본 전처리 방식으로 fallback")
+                processed_pdb = self._process_with_fallback_method(input_pdb, temp_pdb1, target_chains, stats)
+        else:
+            # 고급 Fixer가 없으면 기본 방식 사용
+            processed_pdb = self._process_with_fallback_method(input_pdb, temp_pdb1, target_chains, stats)
         
         # 2단계: 리간드 제거
         temp_pdb2 = f"{output_pdb}.temp2"
@@ -101,8 +129,22 @@ class AdvancedPDBProcessor:
         self.logger.info(f"잔기 수: {stats['original_residues']} → {stats['final_residues']}")
         self.logger.info(f"제거된 잔기: {len(stats['removed_residues'])}개")
         self.logger.info(f"처리된 시스테인: {stats['processed_cysteines']}개")
+        self.logger.info(f"GROMACS 준비 상태: {stats.get('gromacs_ready', 'Unknown')}")
         
         return output_pdb, stats
+    
+    def _process_with_fallback_method(self, input_pdb: str, output_pdb: str, 
+                                    target_chains: List[str], stats: dict) -> str:
+        """기본 fallback 전처리 방법"""
+        
+        # MDAnalysis 우선 시도
+        processed_pdb = self._process_with_mdanalysis(input_pdb, output_pdb, target_chains, stats)
+        
+        if not processed_pdb:
+            self.logger.warning("MDAnalysis 실패, Bio.PDB로 fallback")
+            processed_pdb = self._process_with_biopdb(input_pdb, output_pdb, target_chains, stats)
+        
+        return processed_pdb
     
     def _process_with_mdanalysis(self, input_pdb: str, output_pdb: str, 
                                target_chains: List[str], stats: dict) -> Optional[str]:
@@ -135,7 +177,7 @@ class AdvancedPDBProcessor:
             
             self.logger.info(f"선택된 원자 수: {len(protein_atoms)}")
             
-            # 잔기별 완전성 검사
+            # 잔기별 완전성 검사 (개선된 버전)
             complete_residues = []
             incomplete_residues = []
             
@@ -159,7 +201,7 @@ class AdvancedPDBProcessor:
                     incomplete_residues.append(f"{residue.chainID}:{residue.resid}{resname} (missing backbone)")
                     continue
                 
-                # 중요한 사이드체인 원자 확인
+                # 중요한 사이드체인 원자 확인 (더 엄격하게)
                 if resname in self.critical_sidechain:
                     critical_atoms = self.critical_sidechain[resname]
                     present_atoms = set(residue.atoms.names)
@@ -193,7 +235,7 @@ class AdvancedPDBProcessor:
             # PDB 저장
             final_selection.write(output_pdb)
             
-            stats['processing_method'] = 'MDAnalysis'
+            stats['processing_method'] = 'MDAnalysis_Enhanced'
             self.logger.info(f"MDAnalysis 전처리 완료: {len(final_selection)} 원자")
             
             return output_pdb
@@ -207,7 +249,7 @@ class AdvancedPDBProcessor:
     
     def _process_with_biopdb(self, input_pdb: str, output_pdb: str, 
                            target_chains: List[str], stats: dict) -> str:
-        """Bio.PDB를 사용한 fallback 전처리"""
+        """Bio.PDB를 사용한 fallback 전처리 (개선된 버전)"""
         self.logger.info("Bio.PDB로 PDB 전처리 시작")
         
         parser = PDBParser(QUIET=True)
@@ -234,8 +276,8 @@ class AdvancedPDBProcessor:
         if missing_chains:
             raise ValueError(f"지정된 체인 {missing_chains}이 PDB에 없습니다. 사용 가능한 체인: {unique_chains}")
         
-        # 선택기 클래스
-        class StrictProteinSelect(Select):
+        # 선택기 클래스 (개선된 버전)
+        class EnhancedProteinSelect(Select):
             def __init__(self, target_chains, processor):
                 self.target_chains = target_chains
                 self.processor = processor
@@ -264,7 +306,7 @@ class AdvancedPDBProcessor:
                     self.rejected_residues.append(f"{residue.parent.id}:{residue.id[1]}{resname} (missing backbone)")
                     return False
                 
-                # 중요한 사이드체인 확인
+                # 중요한 사이드체인 확인 (더 엄격하게)
                 if resname in self.processor.critical_sidechain:
                     critical_atoms = self.processor.critical_sidechain[resname]
                     missing_critical = critical_atoms - present_atoms
@@ -275,13 +317,13 @@ class AdvancedPDBProcessor:
                 return True
         
         # 선택 및 저장
-        selector = StrictProteinSelect(target_chains, self)
+        selector = EnhancedProteinSelect(target_chains, self)
         io = PDBIO()
         io.set_structure(structure)
         io.save(output_pdb, selector)
         
         stats['removed_residues'] = selector.rejected_residues
-        stats['processing_method'] = 'Bio.PDB'
+        stats['processing_method'] = 'Bio.PDB_Enhanced'
         
         self.logger.info(f"Bio.PDB 전처리 완료, 제거된 잔기: {len(selector.rejected_residues)}개")
         
@@ -427,11 +469,12 @@ class AdvancedPDBProcessor:
         
         self.logger.info("최종 검증 완료")
 
-# 사용 예시 함수
+
+# 사용 예시 함수 (업데이트됨)
 def process_pdb_for_gromacs(input_pdb: str, output_pdb: str, 
                           target_chains: List[str], logger=None) -> Tuple[str, dict]:
     """
-    GROMACS 시뮬레이션을 위한 PDB 전처리
+    GROMACS 시뮬레이션을 위한 PDB 전처리 - GROMACS 호환성 강화
     
     Args:
         input_pdb: 입력 PDB 파일 경로
@@ -453,7 +496,7 @@ def test_pdb_processing():
     
     input_pdb = "test_input.pdb"
     output_pdb = "test_processed.pdb"
-    target_chains = ['A', 'C']
+    target_chains = ['A', 'B']
     
     try:
         result_pdb, stats = process_pdb_for_gromacs(
@@ -466,6 +509,7 @@ def test_pdb_processing():
         print(f"잔기 수 변화: {stats['original_residues']} → {stats['final_residues']}")
         print(f"제거된 잔기: {len(stats['removed_residues'])}개")
         print(f"처리된 시스테인: {stats['processed_cysteines']}개")
+        print(f"GROMACS 준비 상태: {stats.get('gromacs_ready', 'Unknown')}")
         
     except Exception as e:
         print(f"처리 실패: {e}")
