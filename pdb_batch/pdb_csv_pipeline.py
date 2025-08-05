@@ -11,7 +11,7 @@ CSV 파일에서 PDB 정보를 읽어서:
 
 파일 구조:
 - 기존 파일들: /app/SUMD_automation/
-- 새 파일들: /app/SUMD_automation/pdb_preprocessing/
+- 새 파일들: /app/SUMD_automation/pdb_batch/
 """
 
 import os
@@ -169,14 +169,15 @@ class PDBProcessingPipeline:
             self.logger.info(f"실패: {failed}")
             self.logger.info(f"총 처리 시간: {total_time:.1f}초")
             
-            # 결과 저장
+            # 결과 저장 시 추가 정보 포함
             summary = {
                 'total_entries': len(df),
                 'successful': successful,
                 'failed': failed,
                 'total_time': total_time,
                 'results': results,
-                'stats': self.stats
+                'stats': self.stats,
+                'unique_combinations': len(set(r.get('unique_id', r['pdb_id']) for r in results))  # 고유 조합 수
             }
             
             summary_file = self.output_dir / "processing_summary.json"
@@ -197,10 +198,14 @@ class PDBProcessingPipeline:
         peptide_chain = str(row['Peptide Chain']).strip()
         receptor_chain = str(row['Receptor Chain']).strip()
         
+        # 고유 식별자 생성 (PDB + receptor + ligand chain 조합)
+        unique_id = f"{pdb_id}_{receptor_chain}_{peptide_chain}"
+        
         entry_start_time = time.time()
         
         result = {
             'pdb_id': pdb_id,
+            'unique_id': unique_id,  # 추가
             'peptide_chain': peptide_chain,
             'receptor_chain': receptor_chain,
             'success': False,
@@ -213,34 +218,34 @@ class PDBProcessingPipeline:
         try:
             # 1. PDB 다운로드
             self.logger.info(f"1. PDB 다운로드: {pdb_id}")
-            downloaded_pdb = self.download_pdb(pdb_id)
+            downloaded_pdb = self.download_pdb(pdb_id, receptor_chain, peptide_chain)
             if not downloaded_pdb:
                 result['error'] = "PDB 다운로드 실패"
                 return result
-            
+
             result['downloaded_pdb'] = str(downloaded_pdb)
             self.stats['successful_downloads'] += 1
-            
+
             # 2. Chain 추출
             self.logger.info(f"2. Chain 추출: {receptor_chain} (receptor), {peptide_chain} (ligand)")
             extracted_pdb = self.extract_chains(downloaded_pdb, receptor_chain, peptide_chain)
             if not extracted_pdb:
                 result['error'] = "Chain 추출 실패"
                 return result
-            
+
             result['extracted_pdb'] = str(extracted_pdb)
             self.stats['successful_extractions'] += 1
-            
+
             # 3. PDB 전처리 (GROMACS 호환성)
             self.logger.info(f"3. PDB 전처리 (GROMACS 호환성)")
             processed_pdb = self.process_pdb_for_gromacs_compatibility(
                 extracted_pdb, [receptor_chain, peptide_chain]
             )
             result['processed_pdb'] = str(processed_pdb)
-            
+
             # 4. pdb2gmx 실행
             self.logger.info(f"4. pdb2gmx 실행")
-            pdb2gmx_success = self.run_pdb2gmx(processed_pdb, pdb_id)
+            pdb2gmx_success = self.run_pdb2gmx(processed_pdb, unique_id)  # unique_id 전달
             result['pdb2gmx_success'] = pdb2gmx_success
             
             if pdb2gmx_success:
@@ -249,9 +254,9 @@ class PDBProcessingPipeline:
             else:
                 result['error'] = "pdb2gmx 실행 실패"
             
-            # 처리 시간 기록
+            # 처리 시간 기록 - unique_id 사용
             processing_time = time.time() - entry_start_time
-            self.stats['processing_times'][pdb_id] = processing_time
+            self.stats['processing_times'][unique_id] = processing_time  # pdb_id -> unique_id
             result['processing_time'] = processing_time
             
             return result
@@ -259,17 +264,25 @@ class PDBProcessingPipeline:
         except Exception as e:
             result['error'] = str(e)
             self.stats['failed_entries'].append({
+                'unique_id': unique_id,  # 추가
                 'pdb_id': pdb_id,
+                'receptor_chain': receptor_chain,  # 추가
+                'peptide_chain': peptide_chain,    # 추가
                 'error': str(e)
             })
             return result
     
-    def download_pdb(self, pdb_id: str) -> Optional[Path]:
+    def download_pdb(self, pdb_id: str, receptor_chain: str = None, peptide_chain: str = None) -> Optional[Path]:
         """PDB 파일 다운로드"""
         pdb_dir = self.output_dir / "downloaded_pdbs"
         pdb_dir.mkdir(exist_ok=True)
         
-        pdb_file = pdb_dir / f"{pdb_id}.pdb"
+        # chain 정보가 있으면 고유 파일명 생성, 없으면 기존 방식
+        if receptor_chain and peptide_chain:
+            unique_id = f"{pdb_id}_{receptor_chain}_{peptide_chain}"
+            pdb_file = pdb_dir / f"{unique_id}.pdb"
+        else:
+            pdb_file = pdb_dir / f"{pdb_id}.pdb"
         
         # 이미 다운로드된 경우 건너뛰기
         if pdb_file.exists():
@@ -301,15 +314,16 @@ class PDBProcessingPipeline:
             return None
     
     def extract_chains(self, pdb_file: Path, receptor_chain: str, 
-                      peptide_chain: str) -> Optional[Path]:
+                  peptide_chain: str) -> Optional[Path]:
         """Receptor/Ligand chain 추출"""
         
         # 출력 디렉토리
         extracted_dir = self.output_dir / "extracted_chains"
         extracted_dir.mkdir(exist_ok=True)
         
-        pdb_id = pdb_file.stem
-        output_pdb = extracted_dir / f"{pdb_id}_extracted.pdb"
+        pdb_id = pdb_file.stem.split('_')[0]  # unique_id에서 pdb_id만 추출
+        unique_id = f"{pdb_id}_{receptor_chain}_{peptide_chain}"
+        output_pdb = extracted_dir / f"{unique_id}_extracted.pdb"
         
         # 이미 추출된 경우 건너뛰기
         if output_pdb.exists():
@@ -341,14 +355,15 @@ class PDBProcessingPipeline:
             return None
     
     def process_pdb_for_gromacs_compatibility(self, pdb_file: Path, 
-                                            target_chains: List[str]) -> Path:
+                                        target_chains: List[str]) -> Path:
         """GROMACS 호환성을 위한 PDB 전처리"""
         
         processed_dir = self.output_dir / "processed_pdbs"
         processed_dir.mkdir(exist_ok=True)
         
-        pdb_id = pdb_file.stem
-        processed_pdb = processed_dir / f"{pdb_id}_processed.pdb"
+        # 파일명에서 고유 ID 추출
+        base_name = pdb_file.stem.replace('_extracted', '')
+        processed_pdb = processed_dir / f"{base_name}_processed.pdb"
         
         # 이미 처리된 경우 건너뛰기
         if processed_pdb.exists():
@@ -426,7 +441,7 @@ class PDBProcessingPipeline:
         
         self.logger.info(f"기본 전처리 완료: {selector.removed_residues}개 잔기 제거")
     
-    def run_pdb2gmx(self, pdb_file: Path, pdb_id: str) -> bool:
+    def run_pdb2gmx(self, pdb_file: Path, unique_id: str) -> bool:
         """pdb2gmx 실행"""
         
         if not GROMACS_RUNNER_AVAILABLE:
@@ -434,8 +449,8 @@ class PDBProcessingPipeline:
             return False
         
         try:
-            # 작업 디렉토리
-            work_dir = self.output_dir / "gromacs_results" / pdb_id
+            # 작업 디렉토리 - unique_id 사용
+            work_dir = self.output_dir / "gromacs_results" / unique_id
             work_dir.mkdir(parents=True, exist_ok=True)
             
             # 입력 PDB 복사

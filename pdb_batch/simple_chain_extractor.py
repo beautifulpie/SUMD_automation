@@ -26,13 +26,13 @@ class SimpleChainExtractor:
         self.parser = PDBParser(QUIET=True)
     
     def extract_chains(self, input_pdb: str, output_pdb: str, 
-                      chains_to_extract: List[str]) -> Tuple[bool, Dict]:
+                  chains_to_extract: List[str]) -> Tuple[bool, Dict]:
         """
         지정된 체인들만 추출
         
         Args:
             input_pdb: 입력 PDB 파일
-            output_pdb: 출력 PDB 파일
+            output_pdb: 출력 PDB 파일 (이미 고유 이름으로 전달됨)
             chains_to_extract: 추출할 체인 ID 리스트
             
         Returns:
@@ -63,6 +63,7 @@ class SimpleChainExtractor:
                         }
             
             self.logger.info(f"사용 가능한 체인: {available_chains}")
+            self.logger.info(f"추출 대상 체인: {chains_to_extract}")
             for chain_id, info in chain_info.items():
                 self.logger.info(f"  체인 {chain_id}: {info['residue_count']} 잔기, {info['atom_count']} 원자")
             
