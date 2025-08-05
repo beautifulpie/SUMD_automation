@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -7,12 +8,6 @@ GROMACS pdb2gmx 오류를 방지하기 위한 강력한 PDB 전처리
 - 누락된 중요 원자가 있는 잔기 감지 및 처리
 - 잔기별 완전성 검사 및 복구
 - GROMACS 호환성 확보
-
-주요 기능:
-1. 아미노산별 필수 원자 정의 및 검사
-2. 누락된 원자 복구 (가능한 경우)
-3. 복구 불가능한 잔기 제거
-4. 대체 아미노산으로 변환 (선택적)
 """
 
 import os
@@ -23,7 +18,18 @@ from Bio.PDB.Atom import Atom
 from Bio.PDB.Residue import Residue
 from typing import List, Dict, Set, Optional, Tuple, Any
 import warnings
-warnings.filterwarnings("ignore", category=PDBConstructionWarning)
+
+# PDBConstructionWarning import 추가
+try:
+    from Bio.PDB.PDBExceptions import PDBConstructionWarning
+    warnings.filterwarnings("ignore", category=PDBConstructionWarning)
+except ImportError:
+    # Bio.PDB 버전에 따른 호환성
+    try:
+        from Bio.PDB import PDBConstructionWarning
+        warnings.filterwarnings("ignore", category=PDBConstructionWarning)
+    except ImportError:
+        pass
 
 class AdvancedPDBFixer:
     """GROMACS 호환성을 위한 고급 PDB 수정 클래스"""
@@ -41,15 +47,15 @@ class AdvancedPDBFixer:
         # 필수 백본 원자 (모든 아미노산 공통)
         self.backbone_atoms = {'N', 'CA', 'C', 'O'}
         
-        # 아미노산별 완전한 사이드체인 원자 정의
+        # 아미노산별 완전한 사이드체인 원자 정의 (개선됨)
         self.complete_sidechain_atoms = {
             'ALA': {'CB'},
             'ARG': {'CB', 'CG', 'CD', 'NE', 'CZ', 'NH1', 'NH2'},
             'ASN': {'CB', 'CG', 'OD1', 'ND2'},
             'ASP': {'CB', 'CG', 'OD1', 'OD2'},
             'CYS': {'CB', 'SG'},
-            'GLN': {'CB', 'CG', 'CD', 'OE1', 'NE2'},  # CD 원자 포함!
-            'GLU': {'CB', 'CG', 'CD', 'OE1', 'OE2'},
+            'GLN': {'CB', 'CG', 'CD', 'OE1', 'NE2'},  # CD 원자가 핵심!
+            'GLU': {'CB', 'CG', 'CD', 'OE1', 'OE2'},  # CD 원자가 핵심!
             'GLY': set(),  # 사이드체인 없음
             'HIS': {'CB', 'CG', 'ND1', 'CD2', 'CE1', 'NE2'},
             'ILE': {'CB', 'CG1', 'CG2', 'CD1'},
@@ -68,17 +74,17 @@ class AdvancedPDBFixer:
         # 최소 필수 원자 (이것들이 없으면 잔기 제거)
         self.critical_atoms = {
             'ALA': {'CB'},
-            'ARG': {'CB', 'CG', 'CD'},
+            'ARG': {'CB', 'CG'},  # CD까지는 요구하지 않음
             'ASN': {'CB', 'CG'},
             'ASP': {'CB', 'CG'},
             'CYS': {'CB', 'SG'},
-            'GLN': {'CB', 'CG', 'CD'},  # CD 원자가 핵심!
-            'GLU': {'CB', 'CG', 'CD'},
+            'GLN': {'CB', 'CG', 'CD'},  # CD 원자는 반드시 필요!
+            'GLU': {'CB', 'CG', 'CD'},  # CD 원자는 반드시 필요!
             'GLY': set(),
             'HIS': {'CB', 'CG'},
             'ILE': {'CB', 'CG1'},
             'LEU': {'CB', 'CG'},
-            'LYS': {'CB', 'CG', 'CD'},
+            'LYS': {'CB', 'CG'},  # CD까지는 요구하지 않음
             'MET': {'CB', 'CG', 'SD'},
             'PHE': {'CB', 'CG'},
             'PRO': {'CB', 'CG', 'CD'},
@@ -89,16 +95,23 @@ class AdvancedPDBFixer:
             'VAL': {'CB', 'CG1'}
         }
         
-        # 대체 가능한 아미노산 (복구 불가능시 사용)
-        self.substitution_map = {
-            'GLN': 'ALA',  # GLN이 문제가 되면 ALA로 대체
-            'GLU': 'ALA',
-            'ARG': 'ALA',
-            'LYS': 'ALA',
-            'ASN': 'ALA',
-            'ASP': 'ALA'
+        # 표준 결합 길이 (Å)
+        self.bond_lengths = {
+            'CA-CB': 1.54,
+            'CB-CG': 1.54,
+            'CG-CD': 1.54,
+            'CD-CE': 1.54,
+            'CD-NE': 1.47,
+            'CD-OE1': 1.25,
+            'CD-OE2': 1.25,
+            'CG-OD1': 1.25,
+            'CG-OD2': 1.25,
+            'CB-SG': 1.82,
+            'CG-SD': 1.82,
+            'CB-OG': 1.43,
+            'CB-OG1': 1.43
         }
-        
+
     def fix_pdb_for_gromacs(self, input_pdb: str, output_pdb: str, 
                            target_chains: List[str]) -> Tuple[str, Dict]:
         """GROMACS 호환성을 위한 PDB 수정"""
@@ -113,15 +126,13 @@ class AdvancedPDBFixer:
             'removed_residues': [],
             'substituted_residues': [],
             'recovered_residues': [],
-            'problematic_residues': []
+            'problematic_residues': [],
+            'gln_glu_issues': 0  # GLN/GLU CD 원자 문제 추적
         }
         
         try:
             parser = PDBParser(QUIET=True)
             structure = parser.get_structure("structure", input_pdb)
-            
-            # 문제 있는 잔기들을 추적
-            problematic_residues = []
             
             for model in structure:
                 for chain in model:
@@ -154,32 +165,44 @@ class AdvancedPDBFixer:
                             stats['processed_residues'] += 1
                             
                         elif check_result['status'] == 'recoverable':
-                            # 복구 가능한 잔기
+                            # 복구 시도
                             try:
-                                self._recover_missing_atoms(residue, resname, check_result['missing_atoms'])
-                                stats['recovered_residues'].append(res_key)
-                                stats['processed_residues'] += 1
-                                self.logger.info(f"잔기 복구 성공: {res_key}")
+                                success = self._smart_atom_recovery(residue, resname, check_result['missing_atoms'])
+                                if success:
+                                    stats['recovered_residues'].append(res_key)
+                                    stats['processed_residues'] += 1
+                                    self.logger.info(f"잔기 복구 성공: {res_key}")
+                                else:
+                                    # 복구 실패시 대체 시도
+                                    if resname in ['GLN', 'GLU']:
+                                        stats['gln_glu_issues'] += 1
+                                        self._substitute_to_alanine(residue)
+                                        stats['substituted_residues'].append(f"{res_key} -> ALA (recovery_failed)")
+                                        stats['processed_residues'] += 1
+                                    else:
+                                        residues_to_remove.append(residue)
+                                        stats['removed_residues'].append(res_key + " (recovery_failed)")
                             except Exception as e:
-                                self.logger.error(f"잔기 복구 실패: {res_key} - {e}")
+                                self.logger.error(f"잔기 처리 실패: {res_key} - {e}")
                                 residues_to_remove.append(residue)
-                                stats['problematic_residues'].append(res_key + f" (recovery_failed: {e})")
+                                stats['problematic_residues'].append(res_key + f" (exception: {e})")
                                 
                         elif check_result['status'] == 'substitutable':
-                            # 대체 가능한 잔기
+                            # GLN/GLU CD 원자 문제 등으로 ALA 대체
+                            if resname in ['GLN', 'GLU']:
+                                stats['gln_glu_issues'] += 1
                             try:
-                                new_resname = self.substitution_map.get(resname, 'ALA')
-                                self._substitute_residue(residue, new_resname)
-                                stats['substituted_residues'].append(f"{res_key} -> {new_resname}")
+                                self._substitute_to_alanine(residue)
+                                stats['substituted_residues'].append(f"{res_key} -> ALA")
                                 stats['processed_residues'] += 1
-                                self.logger.info(f"잔기 대체: {res_key} -> {new_resname}")
+                                self.logger.info(f"잔기 대체: {res_key} -> ALA")
                             except Exception as e:
                                 self.logger.error(f"잔기 대체 실패: {res_key} - {e}")
                                 residues_to_remove.append(residue)
                                 stats['problematic_residues'].append(res_key + f" (substitution_failed: {e})")
                                 
                         else:
-                            # 제거해야 하는 잔기
+                            # 제거
                             residues_to_remove.append(residue)
                             stats['removed_residues'].append(res_key + f" ({check_result['reason']})")
                             self.logger.warning(f"잔기 제거: {res_key} - {check_result['reason']}")
@@ -202,6 +225,7 @@ class AdvancedPDBFixer:
             self.logger.info(f"제거된 잔기: {len(stats['removed_residues'])}")
             self.logger.info(f"복구된 잔기: {len(stats['recovered_residues'])}")
             self.logger.info(f"대체된 잔기: {len(stats['substituted_residues'])}")
+            self.logger.info(f"GLN/GLU CD 문제: {stats['gln_glu_issues']}개")
             
             return output_pdb, stats
             
@@ -209,76 +233,31 @@ class AdvancedPDBFixer:
             self.logger.error(f"PDB 수정 실패: {e}")
             raise
     
-    def _check_residue_completeness(self, residue, resname: str) -> Dict:
-        """잔기 완전성 검사"""
-        
-        present_atoms = {atom.get_name().strip() for atom in residue}
-        
-        # 백본 원자 확인
-        missing_backbone = self.backbone_atoms - present_atoms
-        if missing_backbone:
-            return {
-                'status': 'invalid',
-                'reason': f'missing_backbone_{missing_backbone}',
-                'missing_atoms': missing_backbone
-            }
-        
-        # 사이드체인 원자 확인
-        required_sidechain = self.complete_sidechain_atoms.get(resname, set())
-        critical_sidechain = self.critical_atoms.get(resname, set())
-        
-        missing_sidechain = required_sidechain - present_atoms
-        missing_critical = critical_sidechain - present_atoms
-        
-        if not missing_sidechain:
-            # 완전한 잔기
-            return {'status': 'complete', 'missing_atoms': set()}
-        
-        elif not missing_critical:
-            # 일부 원자 누락이지만 핵심 원자는 있음 (복구 가능)
-            return {
-                'status': 'recoverable', 
-                'missing_atoms': missing_sidechain,
-                'reason': f'missing_non_critical_{missing_sidechain}'
-            }
-        
-        elif resname in self.substitution_map:
-            # 핵심 원자 누락이지만 대체 가능
-            return {
-                'status': 'substitutable',
-                'missing_atoms': missing_critical,
-                'reason': f'missing_critical_{missing_critical}'
-            }
-        
-        else:
-            # 복구 불가능
-            return {
-                'status': 'invalid',
-                'reason': f'missing_critical_unrecoverable_{missing_critical}',
-                'missing_atoms': missing_critical
-            }
-    
-    def _recover_missing_atoms(self, residue, resname: str, missing_atoms: Set[str]):
-        """누락된 원자 복구 (간단한 기하학적 추정)"""
+    def _smart_atom_recovery(self, residue, resname: str, missing_atoms: Set[str]) -> bool:
+        """개선된 원자 복구 로직"""
         
         present_atoms = {atom.get_name().strip(): atom for atom in residue}
         
-        # CA 원자를 기준으로 사용
+        # CA 원자가 없으면 복구 불가능
         if 'CA' not in present_atoms:
-            raise ValueError("CA 원자가 없어서 복구 불가능")
+            return False
         
         ca_atom = present_atoms['CA']
         ca_coord = ca_atom.get_coord()
         
-        # 간단한 원자 복구 로직
+        recovery_success = True
+        
+        # 원자별 복구 시도
         for atom_name in missing_atoms:
             try:
-                new_coord = self._estimate_atom_position(
+                new_coord = self._estimate_atom_position_improved(
                     atom_name, resname, present_atoms, ca_coord
                 )
                 
                 if new_coord is not None:
                     # 새 원자 생성
+                    element = atom_name[0] if atom_name[0] in ['C', 'N', 'O', 'S'] else 'C'
+                    
                     new_atom = Atom(
                         name=atom_name,
                         coord=new_coord,
@@ -287,64 +266,100 @@ class AdvancedPDBFixer:
                         altloc=' ',
                         fullname=f' {atom_name:<3}',
                         serial_number=0,
-                        element=atom_name[0]  # 첫 글자를 원소로 가정
+                        element=element
                     )
                     
                     residue.add(new_atom)
                     self.logger.debug(f"원자 복구: {atom_name} in {resname}")
+                else:
+                    recovery_success = False
+                    break
                     
             except Exception as e:
                 self.logger.warning(f"원자 복구 실패: {atom_name} in {resname} - {e}")
-                # 복구 실패시 예외를 다시 발생시켜 상위에서 처리하도록 함
-                raise
+                recovery_success = False
+                break
+        
+        return recovery_success
     
-    def _estimate_atom_position(self, atom_name: str, resname: str, 
-                               present_atoms: Dict, ca_coord: np.ndarray) -> Optional[np.ndarray]:
-        """원자 위치 추정 (매우 간단한 방법)"""
+    def _estimate_atom_position_improved(self, atom_name: str, resname: str, 
+                                       present_atoms: Dict, ca_coord: np.ndarray) -> Optional[np.ndarray]:
+        """개선된 원자 위치 추정"""
         
-        # 기본적인 결합 길이와 각도를 사용한 추정
-        bond_lengths = {
-            'CB': 1.54,   # CA-CB 결합 길이
-            'CG': 1.54,   # CB-CG 결합 길이  
-            'CD': 1.54,   # CG-CD 결합 길이
-            'CE': 1.54,   # CD-CE 결합 길이
-            'NZ': 1.47,   # CE-NZ 결합 길이
-            'OG': 1.43,   # CB-OG 결합 길이
-            'SG': 1.82,   # CB-SG 결합 길이
-            'SD': 1.82,   # CG-SD 결합 길이
-            'OE1': 1.25,  # CD-OE1 결합 길이
-            'NE2': 1.33   # CD-NE2 결합 길이
-        }
+        # GLN/GLU의 CD 원자는 특별히 처리
+        if resname in ['GLN', 'GLU'] and atom_name == 'CD':
+            return self._estimate_cd_position(resname, present_atoms, ca_coord)
         
-        if atom_name not in bond_lengths:
+        # 기본 결합 길이 사용
+        bond_key = self._get_parent_bond_key(atom_name, resname)
+        if bond_key not in self.bond_lengths:
             return None
         
-        # CA를 기준으로 랜덤한 방향으로 적절한 거리에 배치
-        # 실제로는 더 정교한 기하학적 계산이 필요하지만, 
-        # 여기서는 GROMACS에서 처리될 수 있을 정도로만 배치
+        bond_length = self.bond_lengths[bond_key]
         
-        # 랜덤 방향 벡터 생성
-        direction = np.random.randn(3)
-        direction = direction / np.linalg.norm(direction)
+        # 부모 원자 찾기
+        parent_atom_name = self._get_parent_atom(atom_name, resname)
+        if parent_atom_name not in present_atoms:
+            return None
         
-        # 결합 길이만큼 떨어뜨려 배치
-        distance = bond_lengths[atom_name]
-        new_coord = ca_coord + direction * distance
+        parent_coord = present_atoms[parent_atom_name].get_coord()
         
+        # 간단한 방향 추정 (개선된 버전)
+        if parent_atom_name == 'CA':
+            # CA를 기준으로 하는 경우, 백본과의 각도 고려
+            direction = self._get_sidechain_direction(present_atoms, ca_coord)
+        else:
+            # 다른 원자를 기준으로 하는 경우
+            direction = self._get_chain_direction(parent_atom_name, present_atoms)
+        
+        if direction is None:
+            # fallback: 랜덤 방향
+            direction = np.random.randn(3)
+            direction = direction / np.linalg.norm(direction)
+        
+        new_coord = parent_coord + direction * bond_length
         return new_coord
     
-    def _substitute_residue(self, residue, new_resname: str):
-        """잔기를 다른 아미노산으로 대체"""
+    def _estimate_cd_position(self, resname: str, present_atoms: Dict, ca_coord: np.ndarray) -> Optional[np.ndarray]:
+        """GLN/GLU의 CD 원자 위치 특별 추정"""
+        
+        # CB와 CG가 모두 있어야 함
+        if 'CB' not in present_atoms or 'CG' not in present_atoms:
+            return None
+        
+        cb_coord = present_atoms['CB'].get_coord()
+        cg_coord = present_atoms['CG'].get_coord()
+        
+        # CB -> CG 방향으로 연장
+        cb_cg_vector = cg_coord - cb_coord
+        if np.linalg.norm(cb_cg_vector) == 0:
+            return None
+        
+        cb_cg_direction = cb_cg_vector / np.linalg.norm(cb_cg_vector)
+        
+        # CD는 CG에서 CB-CG 방향으로 약 1.54Å 떨어진 곳
+        cd_coord = cg_coord + cb_cg_direction * 1.54
+        
+        return cd_coord
+    
+    def _substitute_to_alanine(self, residue):
+        """잔기를 ALA로 안전하게 대체"""
         
         # 잔기 이름 변경
-        residue.resname = new_resname
+        residue.resname = 'ALA'
         
-        # 새로운 잔기에 불필요한 원자들 제거
-        new_required_atoms = self.backbone_atoms | self.complete_sidechain_atoms.get(new_resname, set())
+        # ALA에 필요한 원자만 남기기: N, CA, C, O, CB
+        required_atoms = {'N', 'CA', 'C', 'O', 'CB'}
         
+        # 불필요한 원자들 제거
         atoms_to_remove = []
+        ca_atom = None
+        
         for atom in residue:
-            if atom.get_name().strip() not in new_required_atoms:
+            atom_name = atom.get_name().strip()
+            if atom_name == 'CA':
+                ca_atom = atom
+            if atom_name not in required_atoms:
                 atoms_to_remove.append(atom.get_id())
         
         for atom_id in atoms_to_remove:
@@ -353,36 +368,133 @@ class AdvancedPDBFixer:
             except:
                 pass
         
-        # 필요한 원자가 부족하면 추가 (ALA의 경우 CB만 있으면 됨)
+        # CB 원자가 없으면 추가
         present_atoms = {atom.get_name().strip() for atom in residue}
-        missing_atoms = new_required_atoms - present_atoms
+        if 'CB' not in present_atoms and ca_atom is not None:
+            cb_coord = self._estimate_cb_for_alanine(ca_atom, residue)
+            if cb_coord is not None:
+                cb_atom = Atom(
+                    name='CB',
+                    coord=cb_coord,
+                    bfactor=ca_atom.get_bfactor(),
+                    occupancy=1.0,
+                    altloc=' ',
+                    fullname=' CB ',
+                    serial_number=0,
+                    element='C'
+                )
+                residue.add(cb_atom)
+
+    def _estimate_cb_for_alanine(self, ca_atom, residue) -> Optional[np.ndarray]:
+        """ALA의 CB 원자 위치 추정 (개선된 버전)"""
         
-        if missing_atoms and new_resname == 'ALA':
-            # ALA의 경우 CB 원자만 추가하면 됨
-            if 'CB' in missing_atoms and 'CA' in present_atoms:
-                ca_atom = None
-                for atom in residue:
-                    if atom.get_name().strip() == 'CA':
-                        ca_atom = atom
-                        break
+        ca_coord = ca_atom.get_coord()
+        
+        # N과 C 원자 찾기
+        n_atom = None
+        c_atom = None
+        
+        for atom in residue:
+            if atom.get_name().strip() == 'N':
+                n_atom = atom
+            elif atom.get_name().strip() == 'C':
+                c_atom = atom
+        
+        if n_atom is None or c_atom is None:
+            # N이나 C가 없으면 간단한 추정
+            return ca_coord + np.array([1.54, 0.0, 0.0])
+        
+        # N-CA-C 평면에 수직인 방향으로 CB 배치
+        n_coord = n_atom.get_coord()
+        c_coord = c_atom.get_coord()
+        
+        ca_n = n_coord - ca_coord
+        ca_c = c_coord - ca_coord
+        
+        # 외적으로 수직 벡터 구하기
+        perpendicular = np.cross(ca_n, ca_c)
+        if np.linalg.norm(perpendicular) == 0:
+            return ca_coord + np.array([1.54, 0.0, 0.0])
+        
+        perpendicular = perpendicular / np.linalg.norm(perpendicular)
+        cb_coord = ca_coord + perpendicular * 1.54
+        
+        return cb_coord
+
+    # 나머지 헬퍼 메서드들...
+    def _get_parent_bond_key(self, atom_name: str, resname: str) -> str:
+        """원자와 부모 원자 간의 결합 키 반환"""
+        if atom_name == 'CB':
+            return 'CA-CB'
+        elif atom_name == 'CG':
+            return 'CB-CG'
+        elif atom_name == 'CD':
+            return 'CG-CD'
+        elif atom_name in ['OE1', 'OE2', 'NE2']:
+            return 'CD-OE1'  # 기본값
+        elif atom_name in ['OD1', 'OD2', 'ND2']:
+            return 'CG-OD1'  # 기본값
+        elif atom_name == 'SG':
+            return 'CB-SG'
+        elif atom_name == 'OG':
+            return 'CB-OG'
+        else:
+            return 'CA-CB'  # fallback
+    
+    def _get_parent_atom(self, atom_name: str, resname: str) -> str:
+        """원자의 부모 원자 이름 반환"""
+        if atom_name == 'CB':
+            return 'CA'
+        elif atom_name == 'CG':
+            return 'CB'
+        elif atom_name == 'CD':
+            return 'CG'
+        elif atom_name in ['OE1', 'OE2', 'NE2']:
+            return 'CD'
+        elif atom_name in ['OD1', 'OD2', 'ND2']:
+            return 'CG'
+        elif atom_name in ['SG', 'OG', 'OG1']:
+            return 'CB'
+        else:
+            return 'CA'  # fallback
+
+    def _get_sidechain_direction(self, present_atoms: Dict, ca_coord: np.ndarray) -> Optional[np.ndarray]:
+        """사이드체인 방향 추정"""
+        # 백본 원자들을 이용해 사이드체인 방향 추정
+        if 'N' in present_atoms and 'C' in present_atoms:
+            n_coord = present_atoms['N'].get_coord()
+            c_coord = present_atoms['C'].get_coord()
+            
+            # N-CA와 CA-C의 이등분선에 수직인 방향
+            n_ca = ca_coord - n_coord
+            ca_c = c_coord - ca_coord
+            
+            if np.linalg.norm(n_ca) > 0 and np.linalg.norm(ca_c) > 0:
+                n_ca = n_ca / np.linalg.norm(n_ca)
+                ca_c = ca_c / np.linalg.norm(ca_c)
                 
-                if ca_atom:
-                    # CB 원자 위치 추정 (CA에서 약간 떨어진 곳)
-                    ca_coord = ca_atom.get_coord()
-                    cb_coord = ca_coord + np.array([1.54, 0.0, 0.0])  # 간단한 추정
-                    
-                    cb_atom = Atom(
-                        name='CB',
-                        coord=cb_coord,
-                        bfactor=ca_atom.get_bfactor(),
-                        occupancy=1.0,
-                        altloc=' ',
-                        fullname=' CB ',
-                        serial_number=0,
-                        element='C'
-                    )
-                    
-                    residue.add(cb_atom)
+                bisector = n_ca + ca_c
+                if np.linalg.norm(bisector) > 0:
+                    bisector = bisector / np.linalg.norm(bisector)
+                    # 백본 평면에 수직인 방향
+                    perpendicular = np.cross(n_ca, ca_c)
+                    if np.linalg.norm(perpendicular) > 0:
+                        perpendicular = perpendicular / np.linalg.norm(perpendicular)
+                        return perpendicular
+        
+        return None
+
+    def _get_chain_direction(self, parent_atom_name: str, present_atoms: Dict) -> Optional[np.ndarray]:
+        """체인 방향 추정"""
+        # 간단한 체인 방향 추정
+        if parent_atom_name == 'CB' and 'CA' in present_atoms:
+            ca_coord = present_atoms['CA'].get_coord()
+            cb_coord = present_atoms[parent_atom_name].get_coord()
+            direction = cb_coord - ca_coord
+            if np.linalg.norm(direction) > 0:
+                return direction / np.linalg.norm(direction)
+        
+        return None
 
 
 class GromacsCompatibleProcessor:

@@ -16,6 +16,11 @@ import logging
 from utils import NumpyEncoder as NE
 from MDPGenerator import MDPGenerator
 
+# 추가된 import
+from Bio.PDB.SASA import ShrakeRupley
+import warnings
+warnings.filterwarnings("ignore")
+
 # 기존 import들 유지
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, script_dir)
@@ -252,6 +257,188 @@ def analyze_interface_changes(initial_pdb, final_pdb, receptor_chain, ligand_cha
     
     return None
 
+def calculate_structure_sasa(pdb_file, logger):
+    """
+    BioPython을 사용하여 구조의 SASA 계산
+    
+    Args:
+        pdb_file: PDB 파일 경로
+        logger: 로거 객체
+        
+    Returns:
+        dict: SASA 분석 결과
+    """
+    try:
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure("structure", pdb_file)
+        
+        # ShrakeRupley 알고리즘을 사용한 SASA 계산
+        sr = ShrakeRupley()
+        sr.compute(structure, level="R")  # Residue 레벨에서 계산
+        
+        total_sasa = 0.0
+        chain_sasa = {}
+        residue_sasa = {}
+        
+        for model in structure:
+            for chain in model:
+                chain_id = chain.id
+                chain_total = 0.0
+                chain_residues = {}
+                
+                for residue in chain:
+                    if hasattr(residue, 'sasa'):
+                        res_sasa = residue.sasa
+                        res_key = f"{residue.id[1]}{residue.get_resname()}"
+                        chain_residues[res_key] = res_sasa
+                        chain_total += res_sasa
+                        total_sasa += res_sasa
+                
+                if chain_total > 0:
+                    chain_sasa[chain_id] = {
+                        'total_sasa': chain_total,
+                        'residue_count': len(chain_residues),
+                        'avg_sasa_per_residue': chain_total / len(chain_residues) if chain_residues else 0
+                    }
+                    residue_sasa[chain_id] = chain_residues
+        
+        sasa_result = {
+            'total_sasa': total_sasa,
+            'chain_sasa': chain_sasa,
+            'residue_sasa': residue_sasa,
+            'calculation_method': 'ShrakeRupley'
+        }
+        
+        logger.info(f"SASA 계산 완료: 총 SASA = {total_sasa:.2f} Ų")
+        for chain_id, data in chain_sasa.items():
+            logger.info(f"  체인 {chain_id}: {data['total_sasa']:.2f} Ų ({data['residue_count']}개 잔기)")
+        
+        return sasa_result
+        
+    except Exception as e:
+        logger.error(f"SASA 계산 실패: {e}")
+        return {
+            'error': str(e),
+            'total_sasa': 0.0,
+            'calculation_method': 'failed'
+        }
+
+def extract_rmsf_data(sample_result, iteration_num, job_output_dir, logger, gromacs_runner=None):
+    """
+    GROMACS를 사용하여 RMSF 데이터 추출 및 저장
+    
+    Args:
+        sample_result: 최적 샘플 결과
+        iteration_num: iteration 번호
+        job_output_dir: 작업 출력 디렉토리
+        logger: 로거 객체
+        gromacs_runner: GROMACS 실행 객체
+        
+    Returns:
+        dict: RMSF 추출 결과
+    """
+    try:
+        if not sample_result or not sample_result.get('success', False):
+            logger.warning("RMSF 추출: 유효한 샘플 결과가 없습니다")
+            return {'success': False, 'error': 'no_valid_sample'}
+        
+        sample_dir = sample_result['sample_dir']
+        rmsf_output_dir = os.path.join(job_output_dir, "rmsf_analysis")
+        os.makedirs(rmsf_output_dir, exist_ok=True)
+        
+        # 궤적 파일과 구조 파일 확인
+        trajectory_files = []
+        structure_files = []
+        
+        # MD 궤적이 있는지 확인
+        for ext in ['.xtc', '.trr']:
+            md_traj = os.path.join(sample_dir, f"md{ext}")
+            if os.path.exists(md_traj):
+                trajectory_files.append(md_traj)
+        
+        # 구조 파일 확인
+        for ext in ['.tpr', '.gro']:
+            struct_file = os.path.join(sample_dir, f"md{ext}")
+            if os.path.exists(struct_file):
+                structure_files.append(struct_file)
+        
+        if not trajectory_files:
+            logger.warning("RMSF 추출: 궤적 파일을 찾을 수 없습니다")
+            return {'success': False, 'error': 'no_trajectory'}
+        
+        if not structure_files:
+            logger.warning("RMSF 추출: 구조 파일을 찾을 수 없습니다")
+            return {'success': False, 'error': 'no_structure'}
+        
+        # GROMACS gmx rmsf 명령어 실행
+        if gromacs_runner:
+            try:
+                rmsf_xvg = os.path.join(rmsf_output_dir, f"iteration_{iteration_num:02d}_rmsf.xvg")
+                rmsf_pdb = os.path.join(rmsf_output_dir, f"iteration_{iteration_num:02d}_rmsf.pdb")
+                
+                # RMSF 계산 파라미터
+                rmsf_params = {
+                    "structure_file": structure_files[0],
+                    "trajectory_file": trajectory_files[0],
+                    "output_xvg": os.path.basename(rmsf_xvg),
+                    "output_pdb": os.path.basename(rmsf_pdb),
+                    "group": "Protein"
+                }
+                
+                # 작업 디렉토리를 RMSF 출력 디렉토리로 변경하여 실행
+                original_work_dir = gromacs_runner.work_dir
+                gromacs_runner.work_dir = rmsf_output_dir
+                
+                # 필요한 파일들을 RMSF 출력 디렉토리로 복사
+                import shutil
+                local_struct = os.path.join(rmsf_output_dir, os.path.basename(structure_files[0]))
+                local_traj = os.path.join(rmsf_output_dir, os.path.basename(trajectory_files[0]))
+                
+                if not os.path.exists(local_struct):
+                    shutil.copy(structure_files[0], local_struct)
+                if not os.path.exists(local_traj):
+                    shutil.copy(trajectory_files[0], local_traj)
+                
+                rmsf_params["structure_file"] = os.path.basename(local_struct)
+                rmsf_params["trajectory_file"] = os.path.basename(local_traj)
+                
+                # RMSF 계산 실행
+                success, message = gromacs_runner.execute_gromacs_command("rmsf", rmsf_params)
+                
+                # 작업 디렉토리 복원
+                gromacs_runner.work_dir = original_work_dir
+                
+                if success and os.path.exists(rmsf_xvg):
+                    # XVG 파일 크기 확인
+                    xvg_size = os.path.getsize(rmsf_xvg)
+                    
+                    logger.info(f"RMSF 추출 완료: {rmsf_xvg} ({xvg_size} bytes)")
+                    
+                    return {
+                        'success': True,
+                        'rmsf_xvg': rmsf_xvg,
+                        'rmsf_pdb': rmsf_pdb if os.path.exists(rmsf_pdb) else None,
+                        'file_size': xvg_size,
+                        'trajectory_used': trajectory_files[0],
+                        'structure_used': structure_files[0]
+                    }
+                else:
+                    logger.error(f"RMSF 계산 실패: {message}")
+                    return {'success': False, 'error': f'gromacs_failed: {message}'}
+                    
+            except Exception as e:
+                gromacs_runner.work_dir = original_work_dir  # 예외 시에도 복원
+                logger.error(f"RMSF 계산 중 예외: {e}")
+                return {'success': False, 'error': str(e)}
+        else:
+            logger.warning("RMSF 추출: GROMACS runner가 없습니다")
+            return {'success': False, 'error': 'no_gromacs_runner'}
+            
+    except Exception as e:
+        logger.error(f"RMSF 추출 실패: {e}")
+        return {'success': False, 'error': str(e)}
+
+
 # ===== 기존 iteration 결과 저장 함수들 유지 =====
 def save_iteration_results(iteration_num, best_sample_result, all_sample_results, 
                          job_output_dir, receptor_chain, ligand_chain, logger):
@@ -407,17 +594,38 @@ def run_single_sample(sample_id, base_dir, processed_pdb, simulation_time, recep
         # === 새로 추가: GRO 파일을 PDB로 변환 ===
         if final_pdb_path.endswith('.gro'):
             pdb_path = final_pdb_path.replace('.gro', '.pdb')
-            success, msg = runner.execute_gromacs_command("convert_to_pdb", {
-                "input_gro": os.path.basename(final_pdb_path),
-                "output_pdb": os.path.basename(pdb_path)
+
+            # 구조 파일 결정 (em.tpr 또는 md.tpr)
+            if simulation_type == "EM+MD":
+                tpr_file = "md.tpr"
+            else:
+                tpr_file = "em.tpr"
+            
+            success, msg = runner.execute_gromacs_command("trjconv", {
+                "structure_file": tpr_file,
+                "input_trajectory": os.path.basename(final_pdb_path),
+                "output_file": os.path.basename(pdb_path),
+                "pbc_option": "mol",
+                "group": "Protein"
             })
-            runner.logger.info(msg)
-            if not success:
+            
+            if success:
+                # 토폴로지 기반 체인 정보 복원
+                restored_pdb_path = pdb_path.replace('.pdb', '_restored.pdb')
+                chain_restored = runner.restore_chain_info_from_topology(
+                    pdb_path, processed_pdb, restored_pdb_path
+                )
+                
+                if chain_restored:
+                    final_pdb_path = restored_pdb_path
+                    logger.info(f"토폴로지 기반 체인 복원 성공: {os.path.basename(restored_pdb_path)}")
+                else:
+                    final_pdb_path = pdb_path
+                    logger.warning(f"체인 복원 실패, 기본 PDB 사용: {os.path.basename(pdb_path)}")
+            else:
                 failure_result['error'] = f"PDB 변환 실패: {msg}"
                 return failure_result
-            
-            final_pdb_path = pdb_path
-
+        
         final_distance = DistanceCalculator.calculate_chain_distance(final_pdb_path, receptor_chain, ligand_chain)
 
         # 성공 결과 반환

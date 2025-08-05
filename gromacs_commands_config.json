@@ -190,6 +190,18 @@
       "input_template": "{group}",
       "required_files": ["{structure_file}", "{input_trajectory}"],
       "output_files": ["{output_file}"]
+    },
+    
+    "rmsf": {
+      "description": "RMSF 계산",
+      "template": "gmx rmsf -s {structure_file} -f {trajectory_file} -o {output_xvg} -oq {output_pdb} -res",
+      "defaults": {
+        "group": "Protein"
+      },
+      "input_required": true,
+      "input_template": "{group}",
+      "required_files": ["{structure_file}", "{trajectory_file}"],
+      "output_files": ["{output_xvg}", "{output_pdb}"]
     }
   },
   

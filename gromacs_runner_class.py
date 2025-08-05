@@ -298,6 +298,143 @@ class GromacsCommandRunner:
         
         return False, "모든 포스필드 시도 실패"
 
+    def restore_chain_info_from_topology(self, converted_pdb: str, original_pdb: str, 
+                                       output_pdb: str) -> bool:
+        """토폴로지 파일 기반 체인 정보 복원 (효율적인 방법)"""
+        try:
+            import glob
+            
+            # 1. 토폴로지 파일들을 알파벳 순으로 스캔
+            topology_files = sorted(glob.glob(os.path.join(self.work_dir, "topol_Protein_chain_*.itp")))
+            
+            if not topology_files:
+                self.logger.warning("토폴로지 파일을 찾을 수 없어 fallback 방식 사용")
+                return self._restore_chain_info_fallback(converted_pdb, original_pdb, output_pdb)
+            
+            # 2. 각 체인의 원자 수 파악
+            chain_atom_counts = {}
+            total_atoms = 0
+            
+            for topo_file in topology_files:
+                chain_id = self._extract_chain_id_from_filename(topo_file)
+                atom_count = self._count_atoms_in_topology(topo_file)
+                
+                if chain_id and atom_count > 0:
+                    chain_atom_counts[chain_id] = atom_count
+                    total_atoms += atom_count
+                    self.logger.debug(f"체인 {chain_id}: {atom_count} 원자")
+            
+            if not chain_atom_counts:
+                self.logger.warning("토폴로지에서 체인 정보 추출 실패")
+                return self._restore_chain_info_fallback(converted_pdb, original_pdb, output_pdb)
+            
+            # 3. PDB 파일에서 체인 할당
+            return self._assign_chains_by_atom_ranges(converted_pdb, output_pdb, chain_atom_counts)
+            
+        except Exception as e:
+            self.logger.error(f"토폴로지 기반 체인 복원 실패: {e}")
+            return self._restore_chain_info_fallback(converted_pdb, original_pdb, output_pdb)
+    
+    def _extract_chain_id_from_filename(self, filename: str) -> str:
+        """파일명에서 체인 ID 추출"""
+        import re
+        match = re.search(r'topol_Protein_chain_([A-Z])\.itp', os.path.basename(filename))
+        return match.group(1) if match else None
+    
+    def _count_atoms_in_topology(self, topology_file: str) -> int:
+        """토폴로지 파일에서 원자 수 카운트"""
+        try:
+            atom_count = 0
+            in_atoms_section = False
+            
+            with open(topology_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    
+                    # [ atoms ] 섹션 시작
+                    if line == "[ atoms ]":
+                        in_atoms_section = True
+                        continue
+                    
+                    # 다른 섹션 시작하면 atoms 섹션 종료
+                    if line.startswith("[") and in_atoms_section:
+                        break
+                    
+                    # atoms 섹션 내에서 원자 라인 카운트
+                    if in_atoms_section and line and not line.startswith(";"):
+                        parts = line.split()
+                        if len(parts) >= 5:  # 최소한의 원자 정보가 있는 라인
+                            atom_count += 1
+            
+            return atom_count
+            
+        except Exception as e:
+            self.logger.error(f"토폴로지 파일 읽기 실패 {topology_file}: {e}")
+            return 0
+    
+    def _assign_chains_by_atom_ranges(self, input_pdb: str, output_pdb: str, 
+                                    chain_atom_counts: dict) -> bool:
+        """원자 범위 기반 체인 할당"""
+        try:
+            from Bio.PDB import PDBParser, PDBIO
+            
+            parser = PDBParser(QUIET=True)
+            structure = parser.get_structure("structure", input_pdb)
+            
+            # 체인을 알파벳 순으로 정렬된 순서로 처리
+            sorted_chains = sorted(chain_atom_counts.keys())
+            
+            # 각 체인의 시작/끝 원자 인덱스 계산
+            chain_ranges = {}
+            current_start = 1
+            
+            for chain_id in sorted_chains:
+                atom_count = chain_atom_counts[chain_id]
+                chain_ranges[chain_id] = (current_start, current_start + atom_count - 1)
+                current_start += atom_count
+            
+            # PDB 구조에서 원자 할당
+            atom_index = 0
+            
+            for model in structure:
+                for chain in model:
+                    chain_atoms = list(chain.get_atoms())
+                    
+                    for atom in chain_atoms:
+                        atom_index += 1
+                        
+                        # 현재 원자가 속할 체인 찾기
+                        for target_chain_id, (start_idx, end_idx) in chain_ranges.items():
+                            if start_idx <= atom_index <= end_idx:
+                                chain.id = target_chain_id
+                                break
+                        else:
+                            # 범위를 벗어나면 마지막 체인에 할당
+                            chain.id = sorted_chains[-1] if sorted_chains else 'A'
+            
+            # 수정된 구조 저장
+            io = PDBIO()
+            io.set_structure(structure)
+            io.save(output_pdb)
+            
+            self.logger.info(f"토폴로지 기반 체인 복원 완료: {sorted_chains}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"체인 할당 실패: {e}")
+            return False
+    
+    def _restore_chain_info_fallback(self, converted_pdb: str, original_pdb: str, output_pdb: str) -> bool:
+        """Fallback: 기존 RMSD 방식 (간단 버전)"""
+        try:
+            import shutil
+            self.logger.warning("Fallback: 체인 정보 없이 변환된 PDB 사용")
+            shutil.copy(converted_pdb, output_pdb)
+            return True
+        except Exception as e:
+            self.logger.error(f"Fallback 방식도 실패: {e}")
+            return False
+
 # 사용 예시
 def test_gromacs_runner():
     """GROMACS Runner 테스트"""

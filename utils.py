@@ -9,6 +9,7 @@ import shutil
 from datetime import datetime
 from Bio.PDB import PDBParser, PDBIO, Select
 from Bio.PDB.Atom import Atom
+from typing import Dict, List, Tuple
 import logging
 
 class NumpyEncoder(json.JSONEncoder):
