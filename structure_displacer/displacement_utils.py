@@ -22,7 +22,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import logging
-import json
+import json, time
 from typing import List, Dict, Tuple, Optional
 from Bio.PDB import PDBParser
 from datetime import datetime
@@ -133,6 +133,7 @@ class Advanced50AAnalyzer:
     
     def analyze_displaced_structure(self, pdb_file: str, target_chains: List[str]) -> Dict:
         """단일 변형된 구조 분석"""
+        analysis_start_time = time.time()
         if len(target_chains) != 2:
             raise ValueError("정확히 2개의 체인이 필요합니다")
         
@@ -267,21 +268,34 @@ class Advanced50AAnalyzer:
                     'path_clear': not analysis_result['path_analysis']['is_path_obstructed']
                 }
             }
+
+            analysis_time = time.time() - analysis_start_time
+
+            analysis_result['timing'] = {
+                'analysis_time_seconds': analysis_time,
+                'analysis_timestamp': datetime.now().isoformat()
+            }
             
             return analysis_result
             
         except Exception as e:
             self.logger.error(f"구조 분석 실패 ({pdb_file}): {e}")
+            analysis_failed_time = time.time() - analysis_start_time
             return {
                 'filename': os.path.basename(pdb_file),
                 'filepath': pdb_file,
                 'error': str(e),
-                'analysis_failed': True
+                'analysis_failed': True,
+                'timing': {
+                    'analysis_time_seconds': analysis_failed_time,
+                    'analysis_timestamp': datetime.now().isoformat()
+                }
             }
     
     def analyze_batch_structures(self, golden_standard: str, displaced_files: List[str], 
                                target_chains: List[str], output_dir: str = None) -> pd.DataFrame:
         """배치 구조 분석"""
+        batch_start_time = time.time()
         if output_dir is None:
             output_dir = "displacement_analysis_50A"
         os.makedirs(output_dir, exist_ok=True)
@@ -289,18 +303,25 @@ class Advanced50AAnalyzer:
         self.logger.info(f"배치 구조 분석 시작: {len(displaced_files)}개 파일")
         
         # Golden Standard 분석
+        golden_start_time = time.time()
         golden_analysis = self.analyze_displaced_structure(golden_standard, target_chains)
+        golden_time = time.time() - golden_start_time
         golden_distance = golden_analysis['distance_analysis']['min_distance']
         
         self.logger.info(f"Golden Standard 거리: {golden_distance:.2f}Å")
+        self.logger.info(f"Golden Standard 분석 시간: {golden_time:.2f}초")
         
         # 각 변형된 구조 분석
         results = []
+        analysis_times = []
         
         for i, displaced_file in enumerate(displaced_files):
+            file_start_time = time.time()
             try:
                 analysis = self.analyze_displaced_structure(displaced_file, target_chains)
-                
+                file_time = time.time() - file_start_time
+                analysis_times.append(file_time)
+
                 if 'analysis_failed' not in analysis:
                     # Golden Standard와의 RMSD 계산
                     rmsd_vs_golden = self.calculate_rmsd(golden_standard, displaced_file, target_chains)
@@ -313,7 +334,8 @@ class Advanced50AAnalyzer:
                     results.append(analysis)
                 
                 if (i + 1) % 10 == 0:
-                    self.logger.info(f"분석 진행: {i + 1}/{len(displaced_files)}")
+                    avg_time = sum(analysis_times[-10:]) / min(10, len(analysis_times))  # 추가
+                    self.logger.info(f"분석 진행: {i + 1}/{len(displaced_files)} (최근 10개 평균: {avg_time:.2f}초/파일)")
                     
             except Exception as e:
                 self.logger.error(f"파일 {displaced_file} 분석 실패: {e}")
@@ -324,6 +346,7 @@ class Advanced50AAnalyzer:
             return pd.DataFrame()
         
         # DataFrame 생성
+        df_creation_start_time = time.time()
         df_data = []
         for result in results:
             row = {
@@ -446,7 +469,13 @@ class Advanced50AAnalyzer:
         with open(summary_file, 'w') as f:
             json.dump(summary_converted, f, indent=2)
         
+        df_creation_time = time.time() - df_creation_start_time
+        batch_total_time = time.time() - batch_start_time
+
         self.logger.info(f"분석 완료: {len(df)}개 구조 분석")
+        self.logger.info(f"배치 분석 총 시간: {batch_total_time:.2f}초")
+        self.logger.info(f"파일당 평균 분석 시간: {sum(analysis_times)/len(analysis_times):.2f}초")
+        self.logger.info(f"DataFrame 생성 시간: {df_creation_time:.2f}초")
         self.logger.info(f"유효한 구조: {len(valid_df)}개 ({len(valid_df)/len(df)*100:.1f}%)")
         if not valid_df.empty:
             best = summary['best_valid_structure']

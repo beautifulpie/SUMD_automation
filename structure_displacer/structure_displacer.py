@@ -527,6 +527,7 @@ class AdvancedStructureDisplacer:
         Returns:
             Tuple[str, Dict]: (출력 파일 경로, 변형 정보)
         """
+        displacement_start_time = time.time()
         if not receptor_chains or not ligand_chains:
             raise ValueError("수용체 체인과 리간드 체인이 모두 필요합니다")
         
@@ -592,18 +593,30 @@ class AdvancedStructureDisplacer:
                 'actual_displacement_distance': self.config.actual_displacement_distance,
                 'target_distance_for_validation': self.config.target_distance_for_validation,
                 'attempts': [],
-                'final_result': None
+                'final_result': None,
+                'timing': {  # 추가
+                    'start_time': displacement_start_time,
+                    'preparation_time': 0,
+                    'generation_time': 0,
+                    'validation_time': 0,
+                    'total_time': 0
+                }
             }
-            
+            preparation_end_time = time.time()
+
             self.logger.info(f"구조 변형 시작: 리간드 체인 {ligand_chains}을 {self.config.actual_displacement_distance}Å 거리로 이동 (목표: {self.config.target_distance_for_validation}Å)")
             self.logger.info(f"수용체 체인: {receptor_chains}, 리간드 체인: {ligand_chains}")
             self.logger.info(f"초기 거리: {initial_distance:.2f}Å")
             
             # 여러 번 시도
             successful = False
+            generation_start_time = time.time()
             
             for attempt in range(self.config.max_attempts):
                 try:
+                    # 시도 시작 시간
+                    attempt_start_time = time.time()
+
                     # 변위 벡터 계산 (첫 번째 리간드와 첫 번째 수용체 기준)
                     displacement_vector, calc_info = self.calculate_displacement_vector(
                         primary_ligand, primary_receptor
@@ -615,22 +628,34 @@ class AdvancedStructureDisplacer:
                         displaced_chain = self.apply_displacement(chain, displacement_vector)
                         displaced_ligand_chains.append(displaced_chain)
                     
+                    # 유효성 검사 시작
+                    validation_start_time = time.time()
                     # 유효성 검사 (첫 번째 변형된 리간드와 첫 번째 수용체 기준)
                     is_valid, validation_result = self.validate_displaced_structure(
                         displaced_ligand_chains[0], primary_receptor, 
                         receptor_chain_objects[1:] + other_chains, original_center
                     )
+
+                    validation_time = time.time() - validation_start_time
+
+                    attempt_total_time = time.time() - attempt_start_time
                     
                     attempt_info = {
                         'attempt_number': attempt + 1,
                         'calculation_info': calc_info,
                         'validation_result': validation_result,
-                        'success': is_valid
+                        'success': is_valid,
+                        'timing': {
+                            'attempt_time': attempt_total_time,
+                            'validation_time': validation_time
+                        }
                     }
                     
                     displacement_info['attempts'].append(attempt_info)
                     
                     if is_valid:
+
+                        save_start_time = time.time()
                         # 성공: 새로운 구조 생성 및 저장
                         new_structure = Structure("displaced")
                         new_model = Model(0)
@@ -657,10 +682,14 @@ class AdvancedStructureDisplacer:
                         io = PDBIO()
                         io.set_structure(new_structure)
                         io.save(output_pdb)
+
+                        save_time = time.time() - save_start_time
                         
                         # 최종 결과 정보
                         final_distance = validation_result['distance_check']['final_distance']
                         
+                        generation_total_time = time.time() - generation_start_time
+
                         displacement_info['final_result'] = {
                             'success': True,
                             'output_file': output_pdb,
@@ -670,9 +699,12 @@ class AdvancedStructureDisplacer:
                             'displacement_vector': displacement_vector.tolist(),
                             'displacement_magnitude': np.linalg.norm(displacement_vector)
                         }
+                        displacement_info['timing']['generation_time'] = generation_total_time
+                        displacement_info['timing']['save_time'] = save_time
                         
                         successful = True
                         self.logger.info(f"구조 변형 성공 (시도 {attempt + 1}회): 최종 거리 {final_distance:.2f}Å")
+                        self.logger.info(f"시도별 평균 시간: {generation_total_time/(attempt+1):.2f}초") 
                         break
                     
                     else:
@@ -692,7 +724,11 @@ class AdvancedStructureDisplacer:
                     self.logger.info(f"시도 {attempt + 1} 중 오류: {e}")
                     continue
             
+            total_time = time.time() - displacement_start_time
+            displacement_info['timing']['total_time'] = total_time
+
             if not successful:
+                self.logger.error(f"구조 변형 실패 - 총 소요시간: {total_time:.2f}초")
                 displacement_info['final_result'] = {
                     'success': False,
                     'error': f"최대 시도 횟수 {self.config.max_attempts}회 도달",
@@ -700,6 +736,7 @@ class AdvancedStructureDisplacer:
                 }
                 raise Exception(f"구조 변형 실패: 최대 시도 횟수 {self.config.max_attempts}회 도달")
             
+            self.logger.info(f"구조 변형 완료 - 총 소요시간: {total_time:.2f}초")
             return output_pdb, displacement_info
             
         except Exception as e:
@@ -719,6 +756,7 @@ class MultipleDisplacer:
                                  num_variants: int = 5, output_dir: str = None,
                                  output_prefix: str = None) -> List[Tuple[str, Dict]]:
         """여러 변형된 구조 생성"""
+        batch_start_time = time.time()
         if output_dir is None:
             output_dir = os.path.dirname(input_pdb) or "."
         
@@ -730,10 +768,12 @@ class MultipleDisplacer:
         
         results = []
         successful_count = 0
+        variant_times = []
         
         self.logger.info(f"다중 변형 구조 생성 시작: {num_variants}개 목표")
         
         for i in range(1, num_variants + 1):
+            variant_start_time = time.time()
             try:
                 output_pdb = os.path.join(output_dir, f"{output_prefix}_{i:03d}.pdb")
                 
@@ -747,6 +787,9 @@ class MultipleDisplacer:
                 result = self.single_displacer.displace_structure(
                     input_pdb, receptor_chains, ligand_chains, output_pdb
                 )
+
+                variant_time = time.time() - variant_start_time
+                variant_times.append(variant_time)
                 
                 results.append(result)
                 successful_count += 1
@@ -757,13 +800,23 @@ class MultipleDisplacer:
                 
                 self.logger.info(f"변형 구조 {i} 완료: "
                                f"최종 거리 {final_result['final_distance']:.2f}Å, "
-                               f"시도 횟수 {final_result['total_attempts']}회")
+                               f"시도 횟수 {final_result['total_attempts']}회, "
+                               f"소요시간: {variant_time:.2f}초")
                 
             except Exception as e:
+                variant_time = time.time() - variant_start_time
+                variant_times.append(variant_time)
                 self.logger.error(f"변형 구조 {i} 생성 실패: {e}")
                 continue
         
+        batch_total_time = time.time() - batch_start_time
+        avg_variant_time = sum(variant_times) / len(variant_times) if variant_times else 0
+        
         self.logger.info(f"다중 변형 구조 생성 완료: 성공 {successful_count}/{num_variants}개")
+        self.logger.info(f"배치 총 소요시간: {batch_total_time:.2f}초")
+        self.logger.info(f"변형체당 평균 시간: {avg_variant_time:.2f}초")
+        if variant_times:
+            self.logger.info(f"시간 범위: {min(variant_times):.2f}초 ~ {max(variant_times):.2f}초")
         
         return results
 

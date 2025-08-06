@@ -12,7 +12,7 @@
 사용법:
     python example_workflow.py --golden_standard native_complex.pdb --receptor_chains A,C --ligand_chains B,D --num_variants 5
 """
-
+import time  # 파일 상단에 추가
 import os
 import sys
 import argparse
@@ -88,6 +88,7 @@ class Advanced50AWorkflowManager:
         Returns:
             List[Tuple[str, Dict]]: 생성된 구조 파일들과 정보
         """
+        step_start_time = time.time()
         self.logger.info("=== 단계 1: 50Å 거리 기반 변형된 구조 생성 ===")
         
         if not receptor_chains or not ligand_chains:
@@ -109,6 +110,7 @@ class Advanced50AWorkflowManager:
         
         # 변형 구조 생성
         displaced_dir = os.path.join(output_dir, "displaced_structures_50A")
+        generation_start_time = time.time()
         results = displacer.generate_multiple_variants(
             golden_standard, 
             receptor_chains,
@@ -116,23 +118,42 @@ class Advanced50AWorkflowManager:
             self.merged_config['num_variants'],
             displaced_dir
         )
+        generation_time = time.time() - generation_start_time
         
+        step_total_time = time.time() - step_start_time
         self.logger.info(f"단계 1 완료: {len(results)}개 변형 구조 생성")
+        self.logger.info(f"변형 생성 시간: {generation_time:.2f}초")
+        self.logger.info(f"단계 1 총 소요시간: {step_total_time:.2f}초")
         
         # 생성 통계
         total_attempts = 0
         successful_structures = 0
+        individual_times = []
         
         for _, info in results:
             if info['final_result']['success']:
                 successful_structures += 1
                 total_attempts += info['final_result']['total_attempts']
+                if 'timing' in info and 'total_time' in info['timing']:  # 추가
+                    individual_times.append(info['timing']['total_time'])
         
         avg_attempts = total_attempts / successful_structures if successful_structures > 0 else 0
+        avg_individual_time = sum(individual_times) / len(individual_times) if individual_times else 0
         
         self.logger.info(f"생성 통계: 성공 {successful_structures}/{self.merged_config['num_variants']}개, "
                         f"평균 시도 횟수 {avg_attempts:.1f}회")
-        
+        self.logger.info(f"개별 구조당 평균 시간: {avg_individual_time:.2f}초")
+
+        # 시간 정보를 각 결과에 추가
+        for _, info in results:
+            if 'step1_timing' not in info:
+                info['step1_timing'] = {
+                    'step_total_time': step_total_time,
+                    'generation_time': generation_time,
+                    'avg_individual_time': avg_individual_time,
+                    'step_start_timestamp': datetime.fromtimestamp(step_start_time).isoformat()
+                }
+
         return results
     
     def step2_analyze_50A_displacement_quality(self, golden_standard: str, displaced_results: List[Tuple[str, Dict]],
@@ -150,6 +171,7 @@ class Advanced50AWorkflowManager:
         Returns:
             Tuple[str, Dict]: (최적 구조 파일, 분석 결과)
         """
+        step_start_time = time.time()
         self.logger.info("=== 단계 2: 50Å 변형 품질 분석 ===")
         
         # 변형된 파일들 추출 (성공한 것들만)
@@ -171,16 +193,21 @@ class Advanced50AWorkflowManager:
         # 품질 분석 실행 (호환성을 위해 첫 번째 수용체와 첫 번째 리간드 사용)
         analysis_dir = os.path.join(output_dir, "quality_analysis_50A")
         target_chains = [receptor_chains[0], ligand_chains[0]]  # 분석용 대표 체인
+        analysis_start_time = time.time()
         df = analyzer.analyze_batch_structures(
             golden_standard, displaced_files, target_chains, analysis_dir
         )
-        
+        analysis_time = time.time() - analysis_start_time
+
         if df.empty:
             raise Exception("품질 분석 결과가 없습니다.")
         
         # 시각화 생성
         if self.merged_config['analysis_config']['create_plots']:
+            viz_start_time = time.time()
             analyzer.create_analysis_plots(df, analysis_dir)
+            viz_time = time.time() - viz_start_time
+            self.logger.info(f"시각화 생성 시간: {viz_time:.2f}초")
         
         # 최적 구조 선택 로직
         select_best_valid_only = self.merged_config['analysis_config']['select_best_valid_only']
@@ -208,6 +235,8 @@ class Advanced50AWorkflowManager:
         best_structure = quality_filtered.iloc[0]
         best_file = best_structure['filepath']
         
+        step_total_time = time.time() - step_start_time
+
         # 분석 요약 생성
         analysis_summary = {
             'selection_criteria': {
@@ -238,6 +267,14 @@ class Advanced50AWorkflowManager:
                 'mean_quality_score': float(df['quality_score'].mean()),
                 'mean_distance': float(df['min_distance'].mean()),
                 'distance_std': float(df['min_distance'].std())
+            },
+            'timing': {
+                'step_total_time': step_total_time,
+                'analysis_time': analysis_time,
+                'visualization_time': viz_time if 'viz_time' in locals() else 0,
+                'file_count': len(displaced_files),
+                'avg_time_per_file': analysis_time / len(displaced_files) if displaced_files else 0,
+                'step_start_timestamp': datetime.fromtimestamp(step_start_time).isoformat()
             }
         }
         
@@ -255,12 +292,27 @@ class Advanced50AWorkflowManager:
                 'distance_error': float(row['distance_error'])
             })
         
+        
+        
         self.logger.info(f"단계 2 완료: 최적 구조 선택")
         self.logger.info(f"선택된 구조: {best_structure['filename']} "
                         f"(품질점수: {best_structure['quality_score']:.3f}, "
                         f"유효성: {best_structure['is_valid']}, "
                         f"거리: {best_structure['min_distance']:.2f}Å)")
         
+        self.logger.info(f"품질 분석 시간: {analysis_time:.2f}초")
+        self.logger.info(f"단계 2 총 소요시간: {step_total_time:.2f}초")
+
+        # 분석 요약에 시간 정보 추가 - 이 부분이 누락되었을 가능성
+        analysis_summary['timing'] = {  # 추가
+            'step_total_time': step_total_time,
+            'analysis_time': analysis_time,
+            'visualization_time': viz_time if 'viz_time' in locals() else 0,
+            'file_count': len(displaced_files),
+            'avg_time_per_file': analysis_time / len(displaced_files) if displaced_files else 0,
+            'step_start_timestamp': datetime.fromtimestamp(step_start_time).isoformat()
+        }
+
         return best_file, analysis_summary
     
     def step3_run_sumd_simulation(self, displaced_structure: str, golden_standard: str,
@@ -278,6 +330,7 @@ class Advanced50AWorkflowManager:
         Returns:
             Dict: 시뮬레이션 결과
         """
+        step_start_time = time.time()
         self.logger.info("=== 단계 3: SuMD 시뮬레이션 실행 ===")
         
         if not receptor_chains or not ligand_chains:
@@ -328,9 +381,11 @@ class Advanced50AWorkflowManager:
         simulation_result = {'success': False}
         
         try:
+            simulation_start_time = time.time()
             # SuMD 실행
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)  # 2시간 타임아웃
-            
+            simulation_time = time.time() - simulation_start_time
+
             if result.returncode == 0:
                 # 성공 결과 파싱
                 output_lines = result.stdout.split('\n')
@@ -361,7 +416,10 @@ class Advanced50AWorkflowManager:
                             }
                         }
                         
+                        simulation_result['execution_info']['simulation_time_seconds'] = simulation_time
+
                         self.logger.info(f"SuMD 시뮬레이션 완료: 수렴={converged}")
+                        self.logger.info(f"SuMD 실행 시간: {simulation_time:.2f}초 ({simulation_time/60:.1f}분)")
                         if final_pdb:
                             self.logger.info(f"최종 구조: {os.path.basename(final_pdb)}")
                         
@@ -376,19 +434,32 @@ class Advanced50AWorkflowManager:
             simulation_result = {
                 'success': False,
                 'error': "SuMD 실행 시간 초과 (2시간)",
-                'timeout': True
+                'timeout': True,
+                'execution_time_seconds': 7200
             }
             self.logger.error("SuMD 실행 시간 초과")
         except Exception as e:
+            simulation_time = time.time() - simulation_start_time if 'simulation_start_time' in locals() else 0
             simulation_result = {
                 'success': False,
                 'error': str(e),
                 'command_used': cmd,
                 'stdout': result.stdout if 'result' in locals() else '',
-                'stderr': result.stderr if 'result' in locals() else ''
+                'stderr': result.stderr if 'result' in locals() else '',
+                'execution_time_seconds': simulation_time,
+                'execution_time_minutes': simulation_time / 60
             }
             self.logger.error(f"SuMD 시뮬레이션 실패: {e}")
+
+        step_total_time = time.time() - step_start_time
         
+        # 시간 정보 추가
+        simulation_result['step_timing'] = {
+            'step_total_time': step_total_time,
+            'setup_time': (simulation_start_time - step_start_time) if 'simulation_start_time' in locals() else 0,
+            'step_start_timestamp': datetime.fromtimestamp(step_start_time).isoformat()
+        }
+        self.logger.info(f"단계 3 총 소요시간: {step_total_time:.2f}초")
         return simulation_result
     
     def run_complete_50A_workflow(self, golden_standard: str, receptor_chains: List[str], ligand_chains: List[str],
@@ -405,6 +476,7 @@ class Advanced50AWorkflowManager:
         Returns:
             Dict: 전체 워크플로우 결과
         """
+        workflow_start_time = time.time()
         os.makedirs(output_dir, exist_ok=True)
         
         workflow_result = {
@@ -414,15 +486,20 @@ class Advanced50AWorkflowManager:
             'receptor_chains': receptor_chains,
             'ligand_chains': ligand_chains,
             'config': self.merged_config,
-            'steps': {}
+            'steps': {},
+            'timing': {  # 추가
+                'workflow_start_timestamp': datetime.fromtimestamp(workflow_start_time).isoformat()
+            }
         }
         
         try:
             # 단계 1: 50Å 변형 구조 생성
+            step1_start = time.time()
             displaced_results = self.step1_generate_50A_displaced_structures(
                 golden_standard, receptor_chains, ligand_chains, output_dir
             )
-            
+            step1_time = time.time() - step1_start
+
             successful_structures = [r for r in displaced_results if r[1]['final_result']['success']]
             
             workflow_result['steps']['displacement'] = {
@@ -431,44 +508,80 @@ class Advanced50AWorkflowManager:
                 'successful_structures': len(successful_structures),
                 'success_rate': len(successful_structures) / len(displaced_results) * 100 if displaced_results else 0,
                 'structures': [result[0] for result in successful_structures],
-                'target_distance': self.merged_config['displacement_config']['target_distance']
+                'target_distance': self.merged_config['displacement_config']['target_distance'],
+                'timing': {
+                    'step_duration': step1_time,
+                    'step_duration_minutes': step1_time / 60
+                }
             }
             
             if len(successful_structures) == 0:
                 raise Exception("변형된 구조 생성에 완전히 실패했습니다.")
             
             # 단계 2: 품질 분석
+            step2_start = time.time()
             best_structure, analysis_summary = self.step2_analyze_50A_displacement_quality(
                 golden_standard, displaced_results, receptor_chains, ligand_chains, output_dir
             )
+            step2_time = time.time() - step2_start
+            
             workflow_result['steps']['analysis'] = {
                 'success': True,
                 'best_structure': best_structure,
-                'analysis_summary': analysis_summary
+                'analysis_summary': analysis_summary,
+                'timing': {
+                    'step_duration': step2_time,
+                    'step_duration_minutes': step2_time / 60
+                }
             }
             
             # 단계 3: SuMD 시뮬레이션
+            step3_start = time.time()
             simulation_result = self.step3_run_sumd_simulation(
                 best_structure, golden_standard, receptor_chains, ligand_chains, output_dir
             )
-            workflow_result['steps']['simulation'] = simulation_result
+            step3_time = time.time() - step3_start
+
+            if 'step_timing' not in simulation_result:
+                simulation_result['step_timing'] = {}
+            simulation_result['step_timing']['step_duration'] = step3_time
+            simulation_result['step_timing']['step_duration_minutes'] = step3_time / 60
             
+            workflow_result['steps']['simulation'] = simulation_result
             workflow_result['overall_success'] = simulation_result['success']
             
         except Exception as e:
             workflow_result['overall_success'] = False
             workflow_result['error'] = str(e)
             self.logger.error(f"워크플로우 실행 실패: {e}")
-        
+
+        workflow_total_time = time.time() - workflow_start_time
         workflow_result['end_time'] = datetime.now().isoformat()
         
+        # 전체 시간 요약 추가
+        workflow_result['timing'].update({
+            'total_workflow_time': workflow_total_time,
+            'total_workflow_minutes': workflow_total_time / 60,
+            'total_workflow_hours': workflow_total_time / 3600,
+            'step_breakdown': {
+                'displacement': workflow_result['steps'].get('displacement', {}).get('timing', {}).get('step_duration', 0),
+                'analysis': workflow_result['steps'].get('analysis', {}).get('timing', {}).get('step_duration', 0),
+                'simulation': workflow_result['steps'].get('simulation', {}).get('step_timing', {}).get('step_duration', 0)
+            },
+            'percentage_breakdown': {
+                'displacement_percent': (workflow_result['steps'].get('displacement', {}).get('timing', {}).get('step_duration', 0) / workflow_total_time * 100) if workflow_total_time > 0 else 0,
+                'analysis_percent': (workflow_result['steps'].get('analysis', {}).get('timing', {}).get('step_duration', 0) / workflow_total_time * 100) if workflow_total_time > 0 else 0,
+                'simulation_percent': (workflow_result['steps'].get('simulation', {}).get('step_timing', {}).get('step_duration', 0) / workflow_total_time * 100) if workflow_total_time > 0 else 0
+            }
+        })
+
         # 결과 저장
         result_file = os.path.join(output_dir, "workflow_result_50A.json")
         with open(result_file, 'w') as f:
             json.dump(workflow_result, f, indent=2, default=str)
         
         return workflow_result
-
+    
 
 def main():
     """메인 함수"""
@@ -595,63 +708,214 @@ def main():
         workflow_manager = Advanced50AWorkflowManager(config, logger)
         
         # 전체 워크플로우 실행
+        overall_start_time = time.time()
         if args.skip_sumd:
             logger.info("SuMD 시뮬레이션을 건너뜁니다.")
-            
+
+            # 단계별 시간 측정을 위한 전체 시간 추적
+            step1_start = time.time()  # 추가
             # 단계 1, 2만 실행
             displaced_results = workflow_manager.step1_generate_50A_displaced_structures(
                 args.golden_standard, receptor_chains, ligand_chains, args.output_dir
             )
-            
+            step1_time = time.time() - step1_start  # 추가
+
+            step2_start = time.time()  # 추가
             best_structure, analysis_summary = workflow_manager.step2_analyze_50A_displacement_quality(
                 args.golden_standard, displaced_results, receptor_chains, ligand_chains, args.output_dir
             )
+            step2_time = time.time() - step2_start  # 추가
+
+            # 개별 구조 시간 수집
+            individual_times = []  # 추가
+            total_attempts = 0
+            successful_structures = 0
             
+            for _, info in displaced_results:  # 추가
+                if info['final_result']['success']:
+                    successful_structures += 1
+                    total_attempts += info['final_result']['total_attempts']
+                    if 'timing' in info and 'total_time' in info['timing']:
+                        individual_times.append(info['timing']['total_time'])
+            
+            overall_time = time.time() - overall_start_time
+
             result = {
                 'displacement_completed': True,
                 'analysis_completed': True,
                 'best_structure': best_structure,
                 'analysis_summary': analysis_summary,
-                'sumd_skipped': True
+                'sumd_skipped': True,
+                'timing': {  # 수정: 더 상세한 시간 정보 포함
+                    'total_workflow_time': overall_time,
+                    'total_workflow_minutes': overall_time / 60,
+                    'step_breakdown': {
+                        'displacement': step1_time,
+                        'analysis': step2_time,
+                        'simulation': 0
+                    },
+                    'percentage_breakdown': {
+                        'displacement_percent': (step1_time / overall_time * 100) if overall_time > 0 else 0,
+                        'analysis_percent': (step2_time / overall_time * 100) if overall_time > 0 else 0,
+                        'simulation_percent': 0
+                    },
+                    'displacement_details': {  # 추가
+                        'successful_structures': successful_structures,
+                        'total_attempts': total_attempts,
+                        'avg_individual_time': sum(individual_times) / len(individual_times) if individual_times else 0,
+                        'individual_times': individual_times
+                    },
+                    'analysis_details': analysis_summary.get('timing', {})  # 추가
+                },
+                'steps': {  # 추가: steps 형태로도 저장
+                    'displacement': {
+                        'success': successful_structures > 0,
+                        'successful_structures': successful_structures,
+                        'timing': {
+                            'step_duration': step1_time,
+                            'step_duration_minutes': step1_time / 60
+                        }
+                    },
+                    'analysis': {
+                        'success': True,
+                        'analysis_summary': analysis_summary,
+                        'timing': {
+                            'step_duration': step2_time,
+                            'step_duration_minutes': step2_time / 60
+                        }
+                    }
+                }
             }
+
+            # 결과 요약 출력
+            print(f"\n=== 50Å 기반 워크플로우 실행 결과 ===")
+            print(f"전체 실행 시간: {overall_time:.2f}초 ({overall_time/60:.1f}분)")
+
+            # 시간 요약 출력 (skip_sumd 모드 포함)
+            if 'timing' in result:  # 수정
+                timing = result['timing']
+                if 'step_breakdown' in timing:
+                    print(f"\n=== 단계별 소요시간 ===")
+                    breakdown = timing['step_breakdown']
+                    percentages = timing.get('percentage_breakdown', {})
+                    
+                    if breakdown.get('displacement', 0) > 0:
+                        print(f"  1. 구조 변형: {breakdown['displacement']:.2f}초 ({breakdown['displacement']/60:.1f}분) - {percentages.get('displacement_percent', 0):.1f}%")
+                    if breakdown.get('analysis', 0) > 0:
+                        print(f"  2. 품질 분석: {breakdown['analysis']:.2f}초 ({breakdown['analysis']/60:.1f}분) - {percentages.get('analysis_percent', 0):.1f}%")
+                    if breakdown.get('simulation', 0) > 0:
+                        print(f"  3. SuMD 시뮬레이션: {breakdown['simulation']:.2f}초 ({breakdown['simulation']/60:.1f}분) - {percentages.get('simulation_percent', 0):.1f}%")
+
+            if 'steps' in result:
+                # 단계별 결과 출력 (기존 코드와 동일하지만 skip_sumd 모드에서도 동작)
+                if 'displacement' in result['steps']:
+                    disp_result = result['steps']['displacement']
+                    print(f"\n1. 50Å 구조 변형: {'성공' if disp_result['success'] else '실패'}")
+                    if disp_result['success']:
+                        print(f"   성공률: 100.0% ({disp_result['successful_structures']}/{disp_result['successful_structures']}개)")  # skip_sumd에서는 성공한 것만 있음
+                        if 'timing' in disp_result:
+                            timing_info = disp_result['timing']
+                            print(f"   소요 시간: {timing_info['step_duration']:.2f}초 ({timing_info['step_duration_minutes']:.1f}분)")
+                
+                if 'analysis' in result['steps']:
+                    analysis_result = result['steps']['analysis']
+                    print(f"2. 품질 분석: {'성공' if analysis_result['success'] else '실패'}")
+                    if analysis_result['success']:
+                        best = analysis_result['analysis_summary']['best_structure']
+                        stats = analysis_result['analysis_summary']['analysis_stats']
+                        print(f"   최적 구조: {best['filename']}")
+                        print(f"   품질 점수: {best['quality_score']:.3f}")
+                        print(f"   유효성: {'유효' if best['is_valid'] else '무효'}")
+                        print(f"   거리: {best['min_distance']:.2f}Å (오차: {best['distance_error']:.2f}Å)")
+                        print(f"   전체 유효율: {stats['validation_rate']:.1f}%")
+                        if 'timing' in analysis_result:
+                            timing_info = analysis_result['timing']
+                            print(f"   소요 시간: {timing_info['step_duration']:.2f}초 ({timing_info['step_duration_minutes']:.1f}분)")
+                            # 상세 분석 시간 정보
+                            if 'analysis_summary' in analysis_result and 'timing' in analysis_result['analysis_summary']:
+                                detailed_timing = analysis_result['analysis_summary']['timing']
+                                print(f"   분석 시간: {detailed_timing['analysis_time']:.2f}초 (파일당 평균: {detailed_timing['avg_time_per_file']:.2f}초)")
+
+            # skip_sumd 모드에서도 결과를 JSON 파일로 저장
+            result_file = os.path.join(args.output_dir, "workflow_result_50A.json")  # 추가
+            with open(result_file, 'w') as f:
+                json.dump(result, f, indent=2, default=str)
         else:
             result = workflow_manager.run_complete_50A_workflow(
                 args.golden_standard, receptor_chains, ligand_chains, args.output_dir
             )
+            overall_time = time.time() - overall_start_time
         
-        # 결과 요약 출력
-        print(f"\n=== 50Å 기반 워크플로우 실행 결과 ===")
-        
-        if 'steps' in result:
-            # 단계별 결과
-            if 'displacement' in result['steps']:
-                disp_result = result['steps']['displacement']
-                print(f"1. 50Å 구조 변형: {'성공' if disp_result['success'] else '실패'}")
-                if disp_result['success']:
-                    print(f"   성공률: {disp_result['success_rate']:.1f}% ({disp_result['successful_structures']}/{disp_result['total_attempted']}개)")
-                    print(f"   목표 거리: {disp_result['target_distance']}Å")
-            
-            if 'analysis' in result['steps']:
-                analysis_result = result['steps']['analysis']
-                print(f"2. 품질 분석: {'성공' if analysis_result['success'] else '실패'}")
-                if analysis_result['success']:
-                    best = analysis_result['analysis_summary']['best_structure']
-                    stats = analysis_result['analysis_summary']['analysis_stats']
-                    print(f"   최적 구조: {best['filename']}")
-                    print(f"   품질 점수: {best['quality_score']:.3f}")
-                    print(f"   유효성: {'유효' if best['is_valid'] else '무효'}")
-                    print(f"   거리: {best['min_distance']:.2f}Å (오차: {best['distance_error']:.2f}Å)")
-                    print(f"   전체 유효율: {stats['validation_rate']:.1f}%")
-            
-            if 'simulation' in result['steps']:
-                sim_result = result['steps']['simulation']
-                print(f"3. SuMD 시뮬레이션: {'성공' if sim_result['success'] else '실패'}")
-                if sim_result['success']:
-                    print(f"   수렴: {'예' if sim_result['converged'] else '아니오'}")
-                    if sim_result.get('final_pdb'):
-                        print(f"   최종 구조: {os.path.basename(sim_result['final_pdb'])}")
-                elif 'error' in sim_result:
-                    print(f"   오류: {sim_result['error']}")
+            # 결과 요약 출력
+            print(f"\n=== 50Å 기반 워크플로우 실행 결과 ===")
+            print(f"전체 실행 시간: {overall_time:.2f}초 ({overall_time/60:.1f}분)")
+
+            # 시간 요약 출력 추가
+            if 'timing' in result:  # 추가
+                timing = result['timing']
+                if 'total_workflow_time' in timing:
+                    print(f"\n=== 단계별 소요시간 ===")
+                    breakdown = timing.get('step_breakdown', {})
+                    percentages = timing.get('percentage_breakdown', {})
+                    
+                    if breakdown.get('displacement', 0) > 0:
+                        print(f"  1. 구조 변형: {breakdown['displacement']:.2f}초 ({breakdown['displacement']/60:.1f}분) - {percentages.get('displacement_percent', 0):.1f}%")
+                    if breakdown.get('analysis', 0) > 0:
+                        print(f"  2. 품질 분석: {breakdown['analysis']:.2f}초 ({breakdown['analysis']/60:.1f}분) - {percentages.get('analysis_percent', 0):.1f}%")
+                    if breakdown.get('simulation', 0) > 0:
+                        print(f"  3. SuMD 시뮬레이션: {breakdown['simulation']:.2f}초 ({breakdown['simulation']/60:.1f}분) - {percentages.get('simulation_percent', 0):.1f}%")
+
+            if 'steps' in result:
+                # 단계별 결과
+                if 'displacement' in result['steps']:
+                    disp_result = result['steps']['displacement']
+                    print(f"1. 50Å 구조 변형: {'성공' if disp_result['success'] else '실패'}")
+                    if disp_result['success']:
+                        print(f"   성공률: {disp_result['success_rate']:.1f}% ({disp_result['successful_structures']}/{disp_result['total_attempted']}개)")
+                        print(f"   목표 거리: {disp_result['target_distance']}Å")
+                        if 'timing' in disp_result:  # 수정
+                            timing = disp_result['timing']
+                            print(f"   소요 시간: {timing['step_duration']:.2f}초 ({timing['step_duration_minutes']:.1f}분)")
+                
+                
+                if 'analysis' in result['steps']:
+                    analysis_result = result['steps']['analysis']
+                    print(f"2. 품질 분석: {'성공' if analysis_result['success'] else '실패'}")
+                    if analysis_result['success']:
+                        best = analysis_result['analysis_summary']['best_structure']
+                        stats = analysis_result['analysis_summary']['analysis_stats']
+                        print(f"   최적 구조: {best['filename']}")
+                        print(f"   품질 점수: {best['quality_score']:.3f}")
+                        print(f"   유효성: {'유효' if best['is_valid'] else '무효'}")
+                        print(f"   거리: {best['min_distance']:.2f}Å (오차: {best['distance_error']:.2f}Å)")
+                        print(f"   전체 유효율: {stats['validation_rate']:.1f}%")
+                        # 시간 정보 추가 수정
+                        if 'timing' in analysis_result:  # 수정
+                            timing = analysis_result['timing']
+                            print(f"   소요 시간: {timing['step_duration']:.2f}초 ({timing['step_duration_minutes']:.1f}분)")
+                            # 상세 분석 시간 정보 추가
+                            if 'analysis_summary' in analysis_result and 'timing' in analysis_result['analysis_summary']:  # 추가
+                                detailed_timing = analysis_result['analysis_summary']['timing']
+                                print(f"   분석 시간: {detailed_timing['analysis_time']:.2f}초 (파일당 평균: {detailed_timing['avg_time_per_file']:.2f}초)")
+                
+                
+                if 'simulation' in result['steps']:
+                    sim_result = result['steps']['simulation']
+                    print(f"3. SuMD 시뮬레이션: {'성공' if sim_result['success'] else '실패'}")
+                    if sim_result['success']:
+                        print(f"   수렴: {'예' if sim_result['converged'] else '아니오'}")
+                        if sim_result.get('final_pdb'):
+                            print(f"   최종 구조: {os.path.basename(sim_result['final_pdb'])}")
+                        # 시간 정보 추가 수정
+                        if 'execution_info' in sim_result and 'simulation_time_seconds' in sim_result['execution_info']:  # 수정
+                            sim_time = sim_result['execution_info']['simulation_time_seconds']
+                            print(f"   시뮬레이션 시간: {sim_time:.2f}초 ({sim_time/60:.1f}분)")
+                    elif 'error' in sim_result:
+                        print(f"   오류: {sim_result['error']}")
+                        # 실패한 경우도 시간 정보 출력 추가
+                        if 'execution_time_seconds' in sim_result:  # 추가
+                            fail_time = sim_result['execution_time_seconds']
+                            print(f"   실행 시간: {fail_time:.2f}초 ({fail_time/60:.1f}분)")
         
         if args.skip_sumd and 'best_structure' in result:
             print(f"선택된 최적 구조: {os.path.basename(result['best_structure'])}")
