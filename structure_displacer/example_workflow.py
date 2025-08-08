@@ -98,8 +98,8 @@ class Advanced50AWorkflowManager:
         displacement_config = DisplacementConfig()
         config_dict = self.merged_config['displacement_config']
         
-        displacement_config.actual_displacement_distance = 60.0  # 고정 거리 모드용 (사용안함)
-        displacement_config.target_distance_for_validation = 50.0  # 목표 표면간 거리
+        # displacement_config.actual_displacement_distance = 60.0  # 고정 거리 모드용 (사용안함)
+        # displacement_config.target_distance_for_validation = 50.0  # 목표 표면간 거리
         displacement_config.use_adaptive_displacement = True  # 적응형 거리 계산 사용
         displacement_config.clash_threshold = config_dict['clash_threshold']
         displacement_config.max_attempts = config_dict['max_attempts']

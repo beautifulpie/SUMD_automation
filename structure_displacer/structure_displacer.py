@@ -39,7 +39,7 @@ class DisplacementConfig:
     
     def __init__(self):
         # 실제 이동할 거리 (Angstrom) - 60Å로 이동하여 50Å 근처에 도달
-        self.actual_displacement_distance = 60.0
+        self.actual_displacement_distance = 15.0
         
         # 적응형 이동 거리 사용 여부
         self.use_adaptive_displacement = True   # True: 기하학적 계산 기반, False: 고정 거리
@@ -59,7 +59,7 @@ class DisplacementConfig:
         self.path_check_resolution = 1.0        # 경로 체크 해상도 (Å)
         
         # 유효성 검사 파라미터 - 최종 목표는 50Å
-        self.target_distance_for_validation = 50.0  # 유효성 검사용 목표 거리
+        self.target_distance_for_validation = 10.0  # 유효성 검사용 목표 거리
 
 
 class MinDistanceCalculator:
@@ -901,8 +901,8 @@ def main():
     
     # 설정 생성
     config = DisplacementConfig()
-    config.actual_displacement_distance = 60.0  # 60Å로 이동하여 여유를 둠
-    config.target_distance_for_validation = 50.0  # 유효성 검사는 50Å 기준
+    # config.actual_displacement_distance = 60.0  # 60Å로 이동하여 여유를 둠
+    # config.target_distance_for_validation = 50.0  # 유효성 검사는 50Å 기준
     config.clash_threshold = args.clash_threshold
     config.max_attempts = args.max_attempts
     config.path_check_threshold = args.path_threshold
