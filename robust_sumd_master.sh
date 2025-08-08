@@ -1,40 +1,43 @@
+
 #!/bin/bash
 # golden_standard_sumd_master.sh - Golden Standard 기반 SuMD 시뮬레이션 마스터 실행 스크립트
 
 set -e  # 오류 발생 시 스크립트 중단
 
-# 기본 설정
+# 기본 설정 - 수정된 부분
 INPUT_PDB=$1
-GOLDEN_STANDARD_PDB=$2           # 새로 추가된 파라미터
+GOLDEN_STANDARD_PDB=$2           
 RECEPTOR_CHAIN=$3
 LIGAND_CHAIN=$4
-SIMULATION_TIME=${5:-1.0}          # 시뮬레이션 시간 (ns, 기본값: 1.0)
-DISTANCE_THRESHOLD=${6:-5.0}       # 동작 임계거리 (Å, 기본값: 5.0)
-RMSD_THRESHOLD=${7:-1.5}           # Golden Standard와의 RMSD 임계값 (Å, 기본값: 1.5)
-MAX_ITERATIONS=${8:-10}            # 최대 반복 횟수 (기본값: 10)
-NUM_SAMPLES=${9:-5}                # 각 반복당 샘플 수 (기본값: 5)
-OUTPUT_DIR=${10:-"/app/output"}    # 출력 디렉토리
-JOB_ID=${11:-""}                   # 작업 ID (기본값: 자동생성)
-SKIP_PREPROCESSING=${12:-"false"}  # 전처리 건너뛰기 (기본값: false)
+SIMULATION_TIME=${5:-0.3}            # 시뮬레이션 시간 (ns, 기본값: 0.3 = 300ps)  ⭐ 변경됨
+DISTANCE_THRESHOLD=${6:-5.0}         # 동작 임계거리 (Å, 기본값: 5.0)
+RMSD_THRESHOLD=${7:-1.5}             # Golden Standard와의 RMSD 임계값 (Å, 기본값: 1.5)
+MAX_ITERATIONS=${8:-10}              # 최대 반복 횟수 (기본값: 10)
+NUM_SAMPLES=${9:-5}                  # 각 반복당 샘플 수 (기본값: 5)
+OUTPUT_DIR=${10:-"/app/output"}      # 출력 디렉토리
+JOB_ID=${11:-""}                     # 작업 ID (기본값: 자동생성)
+SKIP_PREPROCESSING=${12:-"false"}    # 전처리 건너뛰기 (기본값: false)
+MAX_RETRY_PER_ITERATION=${13:-100}   # 각 iteration당 최대 재시도 횟수 (기본값: 100)  ⭐ 새로 추가
 
-# 인자 확인
+# 인자 확인 - 수정된 부분
 if [ -z "$INPUT_PDB" ] || [ -z "$GOLDEN_STANDARD_PDB" ] || [ -z "$RECEPTOR_CHAIN" ] || [ -z "$LIGAND_CHAIN" ]; then
-    echo "사용법: $0 <입력_PDB> <Golden_Standard_PDB> <수용체_체인> <리간드_체인> [시뮬레이션_시간] [거리_임계값] [RMSD_임계값] [최대_반복] [샘플수] [출력_디렉토리] [작업_ID] [전처리_건너뛰기]"
-    echo "예시: $0 displaced_complex.pdb native_complex.pdb A B 2.0 5.0 1.5 10 5 /app/output \"\" false"
+    echo "사용법: $0 <입력_PDB> <Golden_Standard_PDB> <수용체_체인> <리간드_체인> [시뮬레이션_시간] [거리_임계값] [RMSD_임계값] [최대_반복] [샘플수] [출력_디렉토리] [작업_ID] [전처리_건너뛰기] [최대_재시도]"
+    echo "예시: $0 displaced_complex.pdb native_complex.pdb A B 0.3 5.0 1.5 10 5 /app/output \"\" false 100"
     echo ""
-    echo "Golden Standard 기반 다중 샘플링 SuMD 시뮬레이션 설정:"
+    echo "개선된 거리 기반 반복 SuMD 시뮬레이션 설정:"
     echo "  - 입력 PDB: 변형된 구조 (chain이 이동/회전된 상태)"
     echo "  - Golden Standard PDB: 원래 네이티브 구조"
-    echo "  - 각 반복마다 ${NUM_SAMPLES}개의 샘플을 순차 실행"
-    echo "  - 거리 ≤ ${DISTANCE_THRESHOLD}Å: EM + MD (${SIMULATION_TIME}ns) 수행"
-    echo "  - 거리 > ${DISTANCE_THRESHOLD}Å: EM만 수행"
-    echo "  - 수렴 조건: Golden Standard와의 RMSD ≤ ${RMSD_THRESHOLD}Å (마지막 5회 평균)"
-    echo "  - 최대 반복: ${MAX_ITERATIONS}회"
+    echo "  - 각 iteration마다 300ps 고정 시뮬레이션 수행"
+    echo "  - 거리가 개선되지 않으면 해당 iteration 재시도"
+    echo "  - 거리가 개선되면 다음 iteration으로 전이"
+    echo "  - 재시도 횟수가 ${MAX_RETRY_PER_ITERATION}회를 넘으면 원본으로 돌아가서 재시작"
     echo ""
-    echo "새로운 수렴 기준:"
-    echo "  - Golden Standard PDB와 비교하여 절대적 수렴 판정"
-    echo "  - 마지막 5회 iteration의 평균 RMSD가 ${RMSD_THRESHOLD}Å 이하면 수렴"
-    echo "  - 네이티브 구조로의 복귀 정도를 정량적으로 측정"
+    echo "새로운 재시도 시스템:"
+    echo "  - 각 iteration은 거리 개선이 있을 때까지 반복"
+    echo "  - 거리 개선 임계값: 0.1Å"
+    echo "  - 최대 재시도: ${MAX_RETRY_PER_ITERATION}회"
+    echo "  - 재시도 한계 초과 시 원본 구조로 리셋"
+    echo "  - 300ps 고정 시간으로 빠른 반복 가능"
     exit 1
 fi
 
@@ -68,6 +71,7 @@ echo "PDB 파일 분석:"
 echo "  입력 PDB 원자 수: $INPUT_ATOM_COUNT"
 echo "  Golden Standard PDB 원자 수: $GOLDEN_ATOM_COUNT"
 echo "  시스템 크기: $SYSTEM_SIZE"
+echo "  시뮬레이션 시간: ${SIMULATION_TIME}ns (300ps 고정)"  # 수정된 메시지
 echo "  예상 실행 시간: $EXPECTED_TIME"
 
 # 원자 수 차이 확인
@@ -142,22 +146,31 @@ LOG_FILE="${FINAL_OUTPUT_DIR}/sumd_golden_master.log"
 {
 
 echo "=========================================="
-echo "Golden Standard 기반 SuMD 다중 샘플링 시뮬레이션 시작"
+echo "개선된 거리 기반 반복 SuMD 시뮬레이션 시작"  # 수정된 제목
 echo "=========================================="
 echo "작업 ID: $JOB_ID"
 echo "입력 PDB: $INPUT_PDB"
 echo "Golden Standard PDB: $GOLDEN_STANDARD_PDB"
 echo "수용체 체인: $RECEPTOR_CHAIN"
 echo "리간드 체인: $LIGAND_CHAIN"
-echo "시뮬레이션 시간: $SIMULATION_TIME ns"
+echo "시뮬레이션 시간: $SIMULATION_TIME ns (300ps 고정)"  # 수정됨
 echo "거리 임계값: $DISTANCE_THRESHOLD Å"
 echo "RMSD 임계값 (vs Golden): $RMSD_THRESHOLD Å"
 echo "최대 반복 횟수: $MAX_ITERATIONS"
 echo "각 반복당 샘플 수: $NUM_SAMPLES"
+echo "최대 재시도 횟수: $MAX_RETRY_PER_ITERATION"  # 새로 추가
 echo "출력 디렉토리: $FINAL_OUTPUT_DIR"
 echo "시스템 크기: $SYSTEM_SIZE (원자수: $INPUT_ATOM_COUNT)"
 echo "전처리 건너뛰기: $SKIP_PREPROCESSING"
 echo "예상 실행 시간: $EXPECTED_TIME"
+echo "=========================================="
+echo ""
+echo "새로운 반복 알고리즘:"
+echo "  ✓ 300ps 고정 시뮬레이션으로 빠른 반복"
+echo "  ✓ 거리 개선 (>0.1Å)이 있을 때만 다음 단계로 진행"
+echo "  ✓ 개선 없으면 최대 ${MAX_RETRY_PER_ITERATION}회까지 재시도"
+echo "  ✓ 재시도 한계 초과시 원본 구조로 자동 리셋"
+echo "  ✓ Golden Standard 기반 절대적 수렴 판정"
 echo "=========================================="
 
 # Python 스크립트 경로 확인
@@ -179,17 +192,17 @@ echo "  메모리: $(free -h | grep '^Mem:' | awk '{print $2}')"
 echo "  디스크 여유공간: $(df -h . | tail -1 | awk '{print $4}')"
 echo ""
 
-# Golden Standard SuMD 시뮬레이션 실행
-echo "Golden Standard 기반 SuMD 마스터 스크립트 실행 중..."
+# Golden Standard SuMD 시뮬레이션 실행 - 수정된 부분
+echo "개선된 거리 기반 SuMD 마스터 스크립트 실행 중..."
 START_TIME=$(date +%s)
 
 # 전처리 건너뛰기 옵션 처리
 SKIP_PREPROCESSING_FLAG=""
-if [[ "${SKIP_PREPROCESSING,,}" =~ ^(true|1|yes)$ ]]; then
+if [ "$SKIP_PREPROCESSING" = "true" ] || [ "$SKIP_PREPROCESSING" = "1" ] || [ "$SKIP_PREPROCESSING" = "yes" ]; then
     SKIP_PREPROCESSING_FLAG="--skip_preprocessing"
 fi
 
-# Golden Standard 버전인지 확인하고 적절한 파라미터 사용
+# Python 스크립트 실행
 RESULT=$(python3 "$PYTHON_SCRIPT" \
     --input_pdb "$INPUT_PDB" \
     --golden_standard_pdb "$GOLDEN_STANDARD_PDB" \
@@ -201,113 +214,77 @@ RESULT=$(python3 "$PYTHON_SCRIPT" \
     --rmsd_threshold "$RMSD_THRESHOLD" \
     --max_iterations "$MAX_ITERATIONS" \
     --num_samples "$NUM_SAMPLES" \
+    --max_retry_per_iteration "$MAX_RETRY_PER_ITERATION" \
     --job_id "$JOB_ID" \
     --config_file /app/SUMD_automation/gromacs_commands_config.json \
     $SKIP_PREPROCESSING_FLAG 2>&1 | grep "SUMD_RESULT:")
 
-
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
-# 결과 파싱
-if [[ $RESULT == SUMD_RESULT:* ]]; then
-    # SUMD_RESULT:[파일 경로]:[수렴 여부] 형식에서 추출
-    IFS=':' read -ra RESULT_PARTS <<< "$RESULT"
+# ⭐ 완전히 새로운 결과 파싱 로직
+if echo "$RESULT" | grep -q "SUMD_RESULT:"; then
+    echo "원본 결과: $RESULT"
     
-    if [ ${#RESULT_PARTS[@]} -ge 3 ]; then
-        FINAL_PDB="${RESULT_PARTS[1]}"
-        for i in $(seq 2 $(( ${#RESULT_PARTS[@]} - 2 ))); do
-            FINAL_PDB="$FINAL_PDB:${RESULT_PARTS[$i]}"
-        done
-        CONVERGED="${RESULT_PARTS[${#RESULT_PARTS[@]}-1]}"
-        
+    # 1단계: "SUMD_RESULT:" 제거
+    CLEAN_RESULT=$(echo "$RESULT" | sed 's/^SUMD_RESULT://')
+    echo "정리된 결과: $CLEAN_RESULT"
+    
+    # 2단계: 마지막 ':'을 기준으로 분할
+    # 마지막 부분이 수렴 여부 (True/False)
+    CONVERGED=$(echo "$CLEAN_RESULT" | rev | cut -d':' -f1 | rev)
+    
+    # 3단계: 수렴 여부를 제거한 나머지가 파일 경로
+    FINAL_PDB=$(echo "$CLEAN_RESULT" | sed "s/:$CONVERGED\$//")
+    
+    echo "추출된 파일 경로: $FINAL_PDB"
+    echo "추출된 수렴 여부: $CONVERGED"
+    
+    # 결과 검증
+    if [ -z "$FINAL_PDB" ] || [ -z "$CONVERGED" ]; then
+        echo "오류: 결과 파싱 실패"
+        echo "FINAL_PDB: '$FINAL_PDB'"
+        echo "CONVERGED: '$CONVERGED'"
+        EXIT_CODE=1
+    else
         echo ""
         echo "=========================================="
-        echo "Golden Standard 기반 SuMD 시뮬레이션 완료"
+        echo "거리 기반 SuMD 시뮬레이션 완료"
         echo "=========================================="
         echo "최종 구조 파일: $FINAL_PDB"
         echo "수렴 여부: $CONVERGED"
-        echo "실행 시간: ${DURATION}초 ($(date -d@$DURATION -u +%H:%M:%S))"
+        echo "실행 시간: ${DURATION}초"
         echo "시스템 크기: $SYSTEM_SIZE"
         
         # 결과 요약 파일 생성
         SUMMARY_FILE="${FINAL_OUTPUT_DIR}/simulation_summary.txt"
         cat > "$SUMMARY_FILE" << EOF
-=== Golden Standard 기반 SuMD 시뮬레이션 요약 ===
+=== 거리 기반 SuMD 시뮬레이션 요약 ===
 작업 ID: $JOB_ID
 입력 PDB: $INPUT_PDB
 Golden Standard PDB: $GOLDEN_STANDARD_PDB
-수용체 체인: $RECEPTOR_CHAIN
-리간드 체인: $LIGAND_CHAIN
-시뮬레이션 시간: $SIMULATION_TIME ns
-거리 임계값: $DISTANCE_THRESHOLD Å
-RMSD 임계값 (vs Golden): $RMSD_THRESHOLD Å
-최대 반복 횟수: $MAX_ITERATIONS
-시스템 크기: $SYSTEM_SIZE (원자수: $INPUT_ATOM_COUNT)
-
-=== 실행 결과 ===
 최종 구조: $FINAL_PDB
 수렴 여부: $CONVERGED
-실행 시간: ${DURATION}초 ($(date -d@$DURATION -u +%H:%M:%S))
-
-=== 파일 위치 ===
-결과 디렉토리: $FINAL_OUTPUT_DIR
-로그 파일: $LOG_FILE
-결과 JSON: ${FINAL_OUTPUT_DIR}/results.json
+실행 시간: ${DURATION}초
 EOF
         
-        # 수렴 상태에 따른 메시지
+        # 수렴 상태에 따른 처리
         if [ "$CONVERGED" = "True" ] || [ "$CONVERGED" = "true" ]; then
-            echo "상태: Golden Standard로 성공적으로 수렴됨"
-            echo "상태: Golden Standard로 수렴 완료" >> "$SUMMARY_FILE"
+            echo "상태: 수렴 완료 ✅"
             EXIT_CODE=0
         else
-            echo "상태: 최대 반복 횟수 도달 (부분적 성공)"
-            echo "상태: 최대 반복 도달" >> "$SUMMARY_FILE"
-            EXIT_CODE=0  # 부분적 성공도 정상 종료로 처리
+            echo "상태: 부분적 성공 🟡"
+            EXIT_CODE=0
         fi
-        
-        # 추가 분석 실행 (선택적)
-        if [ -f "${FINAL_OUTPUT_DIR}/results.json" ]; then
-            echo ""
-            echo "추가 분석 수행 중..."
-            
-            # 반복별 결과 분석 (jq 오류 방지)
-            if command -v jq >/dev/null 2>&1; then
-                # JSON 파일이 유효한지 먼저 확인
-                if jq empty "${FINAL_OUTPUT_DIR}/results.json" 2>/dev/null; then
-                    TOTAL_ITERATIONS=$(jq '.iterations | length' "${FINAL_OUTPUT_DIR}/results.json" 2>/dev/null || echo "0")
-                    GOLDEN_STANDARD_FILE=$(jq -r '.golden_standard_pdb // "N/A"' "${FINAL_OUTPUT_DIR}/results.json" 2>/dev/null || echo "N/A")
-                    echo "총 반복 횟수: $TOTAL_ITERATIONS"
-                    echo "Golden Standard 파일: $GOLDEN_STANDARD_FILE"
-                    echo "총 반복 횟수: $TOTAL_ITERATIONS" >> "$SUMMARY_FILE"
-                    echo "Golden Standard PDB: $GOLDEN_STANDARD_FILE" >> "$SUMMARY_FILE"
-                    
-                    # 각 반복의 Golden Standard RMSD 변화 추출
-                    echo "" >> "$SUMMARY_FILE"
-                    echo "=== 반복별 Golden Standard RMSD 변화 ===" >> "$SUMMARY_FILE"
-                    
-                    jq -r '.iterations[]? | select(. != null) | 
-                        "반복 \(.iteration // "?"):  거리 \(.initial_distance // "N/A")Å → \(.final_distance // "N/A")Å, Golden RMSD: \(.rmsd_vs_golden // "N/A")Å (\(.simulation_type // "Unknown"))"' \
-                        "${FINAL_OUTPUT_DIR}/results.json" 2>/dev/null >> "$SUMMARY_FILE" || \
-                        echo "반복별 상세 정보 추출 실패" >> "$SUMMARY_FILE"
-                    
-                else
-                    echo "JSON 파일이 손상되었거나 유효하지 않습니다." >> "$SUMMARY_FILE"
-                fi
-            else
-                echo "jq가 설치되지 않아 상세 분석을 건너뜁니다." >> "$SUMMARY_FILE"
-            fi
-        fi
-        
-    else
-        echo "오류: 시뮬레이션 결과 형식이 잘못되었습니다: $RESULT"
-        EXIT_CODE=1
     fi
-else
-    echo "오류: 시뮬레이션 결과를 찾을 수 없습니다."
-    echo "Python 스크립트 직접 실행 결과:"
     
+else
+    echo ""
+    echo "오류: Python 스크립트에서 SUMD_RESULT를 찾을 수 없습니다."
+    echo "실제 Python 출력을 확인하겠습니다:"
+    echo ""
+    
+    # Python 스크립트 직접 실행 (디버깅용)
     python3 "$PYTHON_SCRIPT" \
         --input_pdb "$INPUT_PDB" \
         --golden_standard_pdb "$GOLDEN_STANDARD_PDB" \
@@ -319,8 +296,11 @@ else
         --rmsd_threshold "$RMSD_THRESHOLD" \
         --max_iterations "$MAX_ITERATIONS" \
         --num_samples "$NUM_SAMPLES" \
+        --max_retry_per_iteration "$MAX_RETRY_PER_ITERATION" \
         --job_id "$JOB_ID" \
+        --config_file /app/SUMD_automation/gromacs_commands_config.json \
         $SKIP_PREPROCESSING_FLAG
+    
     EXIT_CODE=1
 fi
 
@@ -340,13 +320,14 @@ echo "  - 결과 JSON: ${FINAL_OUTPUT_DIR}/results.json"
 echo "  - 요약 파일: ${FINAL_OUTPUT_DIR}/simulation_summary.txt"
 echo "  - 각 반복 결과: ${FINAL_OUTPUT_DIR}/iteration_*/sample_*/result_*.pdb"
 echo ""
-echo "Golden Standard 기반 수렴 알고리즘 특징:"
-echo "  - Golden Standard PDB와의 절대적 RMSD 비교"
-echo "  - 마지막 5회 iteration 평균 RMSD ≤ ${RMSD_THRESHOLD}Å로 수렴 판정"
-echo "  - 네이티브 구조로의 복귀 정도를 정량적 측정"
-echo "  - 체인 이동/회전된 구조의 복원 능력 평가"
-echo "  - 각 반복마다 ${NUM_SAMPLES}개 샘플 순차 실행"
-echo "  - 거리 기반 적응형 시뮬레이션 (EM/EM+MD)"
+echo "개선된 거리 기반 반복 알고리즘 특징:"
+echo "  ✓ 300ps 고정 시뮬레이션으로 빠른 iteration"
+echo "  ✓ 거리 개선 (>0.1Å)이 있을 때만 다음 단계 진행"
+echo "  ✓ 개선 없으면 최대 ${MAX_RETRY_PER_ITERATION}회 재시도"
+echo "  ✓ 재시도 한계 초과시 원본으로 자동 리셋"
+echo "  ✓ Golden Standard 기반 절대적 수렴 판정"
+echo "  ✓ 각 iteration마다 ${NUM_SAMPLES}개 샘플 병렬 처리"
+echo "  ✓ 적응형 시뮬레이션 (거리 기반 EM/EM+MD 선택)"
 echo "=========================================="
 
 exit $EXIT_CODE

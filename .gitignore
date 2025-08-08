@@ -65,6 +65,8 @@ venv.bak/
 # Log files
 *.log
 logs/
+*.out.md
+*.out
 
 # Backup files
 *.bak
