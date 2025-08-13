@@ -41,18 +41,19 @@ class MDPGenerator:
         nstxout_compressed = 5000
     
         mdp_content = f"""; 300ps 최적화 분자 시뮬레이션 설정 (시뮬레이션 시간: {simulation_time_ns} ns)
-integrator              = md
+integrator              = sd
 dt                      = {MDPGenerator.TIMESTEP}
 nsteps                  = {nsteps}
 nstenergy               = {nstenergy}
 nstlog                  = {nstlog}
 nstxout-compressed      = {nstxout_compressed}
 
-; 온도 커플링 (300ps에 맞게 더 빠른 반응)
-tcoupl                  = V-rescale
+; Langevin dynamics 파라미터
 tc-grps                 = System
-tau_t                   = 0.1
-ref_t                   = 300
+tau_t                   = 0.1         ; [ps] time constant 
+ref_t                   = 300         ; [K] reference temperature
+bd-fric                 = 0           ; auto-calculate: mass/tau_t
+ld-seed                 = -1          ; random seed from process ID
 
 ; 압력 커플링 (300ps에 맞게 조정)
 pcoupl                  = C-rescale
@@ -162,3 +163,115 @@ pbc                 = xyz
             info["optimizations"] = ["표준 설정 사용"]
             
         return info
+    
+    @staticmethod
+    def generate_nvt_mdp(output_file, simulation_time_ns=0.1):
+        """300ps SuMD에 최적화된 NVT 평형 설정 (100ps)"""
+        nsteps = int((simulation_time_ns * 1000) / MDPGenerator.TIMESTEP)  # 100ps = 50000 steps
+        
+        mdp_content = f"""; NVT 평형 (100ps) - SuMD 최적화
+title                   = NVT equilibration for SuMD
+define                  = -DPOSRES
+integrator              = md
+dt                      = {MDPGenerator.TIMESTEP}
+nsteps                  = {nsteps}
+nstenergy               = 500
+nstlog                  = 500
+nstxout-compressed      = 500
+
+; 결합 제약
+constraints             = h-bonds
+constraint_algorithm    = lincs
+lincs_iter              = 1
+lincs_order             = 4
+
+; 비결합 상호작용
+cutoff-scheme           = Verlet
+ns_type                 = grid
+nstlist                 = 10
+rcoulomb                = 1.0
+rvdw                    = 1.0
+DispCorr                = EnerPres
+
+; 정전기학
+coulombtype             = PME
+pme_order               = 4
+fourierspacing          = 0.16
+
+; 온도 커플링
+tcoupl                  = V-rescale
+tc-grps                 = Protein Non-Protein
+tau_t                   = 0.1     0.1
+ref_t                   = 300     300
+
+; 압력 커플링 끔 (NVT)
+pcoupl                  = no
+
+; 주기적 경계 조건
+pbc                     = xyz
+
+; 초기 속도 생성
+gen_vel                 = yes
+gen_temp                = 300
+gen_seed                = -1
+"""
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(mdp_content)
+
+    @staticmethod
+    def generate_npt_mdp(output_file, simulation_time_ns=0.1):
+        """300ps SuMD에 최적화된 NPT 평형 설정 (100ps)"""
+        nsteps = int((simulation_time_ns * 1000) / MDPGenerator.TIMESTEP)  # 100ps = 50000 steps
+        
+        mdp_content = f"""; NPT 평형 (100ps) - SuMD 최적화  
+title                   = NPT equilibration for SuMD
+define                  = -DPOSRES
+integrator              = md
+dt                      = {MDPGenerator.TIMESTEP}
+nsteps                  = {nsteps}
+nstenergy               = 500
+nstlog                  = 500
+nstxout-compressed      = 500
+
+; 결합 제약
+continuation            = yes
+constraints             = h-bonds
+constraint_algorithm    = lincs
+lincs_iter              = 1
+lincs_order             = 4
+
+; 비결합 상호작용
+cutoff-scheme           = Verlet
+ns_type                 = grid
+nstlist                 = 10
+rcoulomb                = 1.0
+rvdw                    = 1.0
+DispCorr                = EnerPres
+
+; 정전기학
+coulombtype             = PME
+pme_order               = 4
+fourierspacing          = 0.16
+
+; 온도 커플링
+tcoupl                  = V-rescale
+tc-grps                 = Protein Non-Protein
+tau_t                   = 0.1     0.1
+ref_t                   = 300     300
+
+; 압력 커플링 (NPT) - C-rescale 사용
+pcoupl                  = C-rescale
+pcoupltype              = isotropic
+tau_p                   = 2.0
+ref_p                   = 1.0
+compressibility         = 4.5e-5
+refcoord_scaling        = com
+
+; 주기적 경계 조건
+pbc                     = xyz
+
+; 초기 속도 생성 끔 (NVT에서 이어받음)
+gen_vel                 = no
+"""
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(mdp_content)
