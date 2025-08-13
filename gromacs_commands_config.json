@@ -21,7 +21,7 @@
       "description": "시뮬레이션 박스 설정",
       "template": "gmx editconf -f {input_gro} -o {output_gro} -c -d {box_distance} -bt {box_type}",
       "defaults": {
-        "box_distance": "1.0",
+        "box_distance": "1.5",
         "box_type": "cubic"
       },
       "large_system_overrides": {
@@ -30,7 +30,7 @@
       "required_files": ["{input_gro}"],
       "output_files": ["{output_gro}"]
     },
-    
+
     "solvate": {
       "description": "수용액으로 시스템 채우기",
       "template": "gmx solvate -cp {input_gro} -cs {solvent_gro} -o {output_gro} -p {topology}",
@@ -45,15 +45,15 @@
       "description": "이온 추가를 위한 전처리",
       "template": "gmx grompp -f {mdp_file} -c {input_gro} -p {topology} -o {output_tpr} -maxwarn {maxwarn}",
       "defaults": {
-        "maxwarn": "10"
+        "maxwarn": "1"
       },
       "large_system_overrides": {
-        "maxwarn": "15"
+        "maxwarn": "2"
       },
       "required_files": ["{mdp_file}", "{input_gro}", "{topology}"],
       "output_files": ["{output_tpr}"]
     },
-    
+
     "genion": {
       "description": "이온 추가로 중성화",
       "template": "gmx genion -s {input_tpr} -o {output_gro} -p {topology} -pname {positive_ion} -nname {negative_ion} -neutral",
@@ -72,10 +72,10 @@
       "description": "시뮬레이션을 위한 전처리",
       "template": "gmx grompp -f {mdp_file} -c {input_gro} -p {topology} -o {output_tpr} -maxwarn {maxwarn}",
       "defaults": {
-        "maxwarn": "10"
+        "maxwarn": "1"
       },
       "large_system_overrides": {
-        "maxwarn": "15"
+        "maxwarn": "2"
       },
       "required_files": ["{mdp_file}", "{input_gro}", "{topology}"],
       "output_files": ["{output_tpr}"]
@@ -87,7 +87,7 @@
       "defaults": {
         "ntomp": "2",
         "nb_mode": "gpu",
-        "gpu_id": "3"
+        "gpu_id": "1"
       },
       "parallel_options": {
         "enable_auto": false,
@@ -104,11 +104,11 @@
         "mpi_ranks": "4",
         "ntomp": "2", 
         "nb_mode": "gpu",
-        "gpu_id": "3"
+        "gpu_id": "1"
       },
       "large_system_overrides": {
-        "mpi_ranks": "8",
-        "ntomp": "4"
+        "mpi_ranks": "1",
+        "ntomp": "1"
       },
       "gpu_options": {
         "pme_mode": "auto",
@@ -130,11 +130,11 @@
         "mpi_ranks": "4",
         "ntomp": "2",
         "nb_mode": "gpu", 
-        "gpu_id": "3"
+        "gpu_id": "1"
       },
       "large_system_overrides": {
-        "mpi_ranks": "6",
-        "ntomp": "3"
+        "mpi_ranks": "4",
+        "ntomp": "2"
       },
       "required_files": ["{prefix}.tpr"],
       "output_files": ["{prefix}.gro", "{prefix}.log", "{prefix}.edr"]
@@ -147,11 +147,11 @@
         "mpi_ranks": "4",
         "ntomp": "2",
         "nb_mode": "gpu",
-        "gpu_id": "3",
+        "gpu_id": "1",
         "pme_mode": "auto"
       },
       "large_system_overrides": {
-        "mpi_ranks": "8",
+        "mpi_ranks": "4",
         "ntomp": "2",
         "pme_mode": "cpu"
       },
@@ -171,17 +171,69 @@
         "mpi_ranks": "4",
         "ntomp": "2",
         "nb_mode": "gpu",
-        "gpu_ids": "23",
-        "gpu_tasks": "0011"
+        "gpu_ids": "12",
+        "gpu_tasks": "0110"
       },
       "multi_gpu_notes": "gpu_ids와 gpu_tasks는 GPU 개수와 랭크 수에 맞게 조정 필요",
       "required_files": ["{prefix}.tpr"],
       "output_files": ["{prefix}.gro", "{prefix}.log", "{prefix}.edr"]
     },
-    
+
+    "grompp_nvt": {
+      "description": "NVT 평형을 위한 전처리",
+      "template": "gmx grompp -f {mdp_file} -c {input_gro} -r {reference_gro} -p {topology} -o {output_tpr} -maxwarn {maxwarn}",
+      "defaults": {
+        "maxwarn": "1"
+      },
+      "large_system_overrides": {
+        "maxwarn": "2"
+      },
+      "required_files": ["{mdp_file}", "{input_gro}", "{reference_gro}", "{topology}"],
+      "output_files": ["{output_tpr}"]
+    },
+
+    "mdrun_nvt": {
+      "description": "NVT 평형 실행",
+      "template": "mpirun --allow-run-as-root -np {mpi_ranks} gmx_mpi mdrun -v -deffnm {prefix} -ntomp {ntomp} -nb {nb_mode} -gpu_id {gpu_id}",
+      "defaults": {
+        "mpi_ranks": "4",
+        "ntomp": "2",
+        "nb_mode": "gpu",
+        "gpu_id": "1"
+      },
+      "required_files": ["{prefix}.tpr"],
+      "output_files": ["{prefix}.gro", "{prefix}.log", "{prefix}.edr", "{prefix}.cpt"]
+    },
+
+    "grompp_npt": {
+      "description": "NPT 평형을 위한 전처리", 
+      "template": "gmx grompp -f {mdp_file} -c {input_gro} -r {reference_gro} -t {checkpoint_file} -p {topology} -o {output_tpr} -maxwarn {maxwarn}",
+      "defaults": {
+        "maxwarn": "1"
+      },
+      "large_system_overrides": {
+        "maxwarn": "2"
+      },
+      "required_files": ["{mdp_file}", "{input_gro}", "{reference_gro}", "{checkpoint_file}", "{topology}"],
+      "output_files": ["{output_tpr}"]
+    },
+
+    "mdrun_npt": {
+      "description": "NPT 평형 실행",
+      "template": "mpirun --allow-run-as-root -np {mpi_ranks} gmx_mpi mdrun -v -deffnm {prefix} -ntomp {ntomp} -nb {nb_mode} -gpu_id {gpu_id}",
+      "defaults": {
+        "mpi_ranks": "4",
+        "ntomp": "2",
+        "nb_mode": "gpu",
+        "gpu_id": "1"
+      },
+      "required_files": ["{prefix}.tpr"],
+      "output_files": ["{prefix}.gro", "{prefix}.log", "{prefix}.edr", "{prefix}.cpt"]
+    },
+
     "trjconv": {
       "description": "궤적 파일 변환",
-      "template": "gmx trjconv -s {structure_file} -f {input_trajectory} -o {output_file} -pbc {pbc_option}",
+      "template": "gmx trjconv -s {structure_file} -f {input_trajectory} -o {output_file} -pbc {pbc_option} -sep",
       "defaults": {
         "group": "Protein",
         "pbc_option": "mol"
@@ -248,37 +300,40 @@
   
   "timeout_settings": {
     "small_system": {
-      "pdb2gmx": 60,
-      "editconf": 30,
-      "solvate": 120,
-      "grompp": 60,
-      "genion": 60,
-      "mdrun_em": 300,
-      "mdrun_md": 900,
-      "mdrun_mpi": 1200,
-      "trjconv": 60
+      "pdb2gmx": 600,
+      "editconf": 300,
+      "solvate": 1200,
+      "grompp": 600,
+      "genion": 600,
+      "mdrun_em": 3000,
+      "mdrun_nvt": 6000,
+      "mdrun_npt": 6000,
+      "mdrun_md": 9000,
+      "trjconv": 600
     },
     "medium_system": {
-      "pdb2gmx": 120,
-      "editconf": 60,
-      "solvate": 300,
-      "grompp": 120,
-      "genion": 120,
+      "pdb2gmx": 1200,
+      "editconf": 600,
+      "solvate": 3000,
+      "grompp": 1200,
+      "genion": 1200,
       "mdrun_em": 600,
-      "mdrun_md": 1800,
-      "mdrun_mpi": 2400,
-      "trjconv": 120
+      "mdrun_nvt": 12000,
+      "mdrun_npt": 12000,
+      "mdrun_md": 18000,
+      "trjconv": 1200
     },
     "large_system": {
-      "pdb2gmx": 300,
-      "editconf": 120,
-      "solvate": 600,
-      "grompp": 300,
-      "genion": 300,
-      "mdrun_em": 1800,
-      "mdrun_md": 3600,
-      "mdrun_mpi": 4800,
-      "trjconv": 300
+      "pdb2gmx": 3000,
+      "editconf": 1200,
+      "solvate": 6000,
+      "grompp": 3000,
+      "genion": 3000,
+      "mdrun_em": 18000,
+      "mdrun_nvt": 24000,
+      "mdrun_npt": 24000,
+      "mdrun_md": 36000,
+      "trjconv": 3000
     }
   }
 }
