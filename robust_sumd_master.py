@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
-import os
+import os, re
 import sys
 import numpy as np
 import hashlib
@@ -496,148 +496,391 @@ def save_iteration_results(iteration_num, best_sample_result, all_sample_results
         logger.error(f"Iteration {iteration_num} 결과 저장 실패: {e}")
         return None
 
-# ===== 기존 run_single_sample 함수 유지 (수정 없음) =====
-def run_single_sample(sample_id, base_dir, processed_pdb, simulation_time, receptor_chain, ligand_chain, 
-                     distance_threshold, logger, system_size="medium", config_file=None):
-    """단일 샘플 시뮬레이션 실행 - GROMACS 단계별 성공 여부 확인 로직 추가"""
-    sample_dir = os.path.join(base_dir, f"sample_{sample_id}")
-    os.makedirs(sample_dir, exist_ok=True)
+def analyze_trajectory_slope(runner, original_pdb, xtc_file, tpr_file, receptor_chain, ligand_chain, sample_dir, logger):
+    """
+    XTC 궤적 파일에서 프레임별 거리를 계산하고 기울기 분석
+    SuMD 오리지널 로직 구현
     
-    logger.info(f"샘플 {sample_id} 시작 (시스템 크기: {system_size})")
-    
-    # 실패 시 반환할 기본 딕셔너리
-    failure_result = {
-        'sample_id': sample_id, 'initial_distance': float('inf'), 'final_distance': float('inf'),
-        'final_pdb': None, 'simulation_type': 'failed', 'sample_dir': sample_dir,
-        'success': False, 'error': 'Unknown error'
-    }
-
+    Returns:
+        tuple: (slope, is_decreasing, distances_list, final_distance)
+    """
     try:
-        input_pdb_path = os.path.join(sample_dir, "input.pdb")
-        shutil.copy(processed_pdb, input_pdb_path)
+
+        slope = 0.0
+        is_decreasing=False
+        distances=[]
+        final_distance=float('inf')
+
+        # 먼저 XTC를 PDB로 변환하여 각 프레임 추출
+        temp_dir = os.path.join(sample_dir, "trajectory_analysis")
+        trajectory_pdb = os.path.join(temp_dir, "trajectory.pdb")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # 전체 궤적을 각각 PDB로 변환 (모든 프레임)
+        success, msg = runner.execute_gromacs_command("trjconv", {
+            "structure_file": tpr_file,
+            "input_trajectory": xtc_file,
+            "output_file": trajectory_pdb,
+            "pbc_option": "mol",
+            "group": "Protein"
+        })
         
-        MDPGenerator.generate_em_mdp(os.path.join(sample_dir, "em.mdp"), simulation_time, system_size)
-        MDPGenerator.generate_ions_mdp(os.path.join(sample_dir, "ions.mdp"), simulation_time)
-        MDPGenerator.generate_md_mdp(os.path.join(sample_dir, "md.mdp"), simulation_time)
+        if not success:
+            logger.error(f"궤적 변환 실패: {msg}")
+            raise Exception(f"궤적 변환 실패: {msg}")
         
-        initial_distance = DistanceCalculator.calculate_chain_distance(processed_pdb, receptor_chain, ligand_chain)
-        failure_result['initial_distance'] = initial_distance
-
-        runner = GromacsCommandRunner(sample_dir, config_file, logger, system_size)
+        # 변환된 PDB에서 각 MODEL별로 거리 계산
         
-        # --- GROMACS 파이프라인 시작 ---
-        # 1. pdb2gmx
-        success, msg = runner.try_multiple_force_fields({"input_pdb": "input.pdb", "output_gro": "processed.gro", "output_top": "topol.top"})
-        if not success:
-            failure_result['error'] = f"pdb2gmx 실패: {msg}"
-            return failure_result
-
-        # 2. editconf
-        success, msg = runner.execute_gromacs_command("editconf", {"input_gro": "processed.gro", "output_gro": "boxed.gro"})
-        if not success:
-            failure_result['error'] = f"editconf 실패: {msg}"
-            return failure_result
-
-        # 3. solvate
-        success, msg = runner.execute_gromacs_command("solvate", {"input_gro": "boxed.gro", "output_gro": "solvated.gro", "topology": "topol.top"})
-        if not success:
-            failure_result['error'] = f"solvate 실패: {msg}"
-            return failure_result
-
-        # 4. grompp (ions)
-        success, msg = runner.execute_gromacs_command("grompp_ions", {"mdp_file": "ions.mdp", "input_gro": "solvated.gro", "topology": "topol.top", "output_tpr": "ions.tpr"})
-        if not success:
-            failure_result['error'] = f"grompp_ions 실패: {msg}"
-            return failure_result
-
-        # 5. genion
-        success, msg = runner.execute_gromacs_command("genion", {"input_tpr": "ions.tpr", "output_gro": "neutral.gro", "topology": "topol.top"}, max_retries=2)
-        if not success:
-            failure_result['error'] = f"genion 실패: {msg}"
-            return failure_result
+        distances = []
         
-        # --- 시뮬레이션 실행 ---
-        simulation_type = "EM+MD"
-
-        # 6. grompp (EM)
-        success, msg = runner.execute_gromacs_command("grompp_simulation", {"mdp_file": "em.mdp", "input_gro": "neutral.gro", "topology": "topol.top", "output_tpr": "em.tpr"})
-        if not success:
-            failure_result['error'] = f"grompp_em 실패: {msg}"
-            return failure_result
-
-        # 7. mdrun (EM)
-        success, msg = runner.execute_gromacs_command("mdrun_em", {"prefix": "em"})
-        if not success:
-            failure_result['error'] = f"mdrun_em 실패: {msg}"
-            return failure_result
-
-        # 8. grompp (MD)
-        success, msg = runner.execute_gromacs_command("grompp_simulation", {"mdp_file": "md.mdp", "input_gro": "em.gro", "topology": "topol.top", "output_tpr": "md.tpr"})
-        if not success:
-            failure_result['error'] = f"grompp_md 실패: {msg}"
-            return failure_result
+        if os.path.exists(os.path.join(temp_dir, "trajectory0.pdb")):
+            distances = _extract_distances_from_trajectory_pdb(
+                trajectory_pdb, original_pdb, receptor_chain, ligand_chain, logger, runner
+            )
         
-        # 9. mdrun (MD)
-        success, msg = runner.execute_gromacs_command("mdrun_md", {"prefix": "md"})
-        if not success:
-            failure_result['error'] = f"mdrun_md 실패: {msg}"
-            return failure_result
-        final_pdb_path = os.path.join(sample_dir, "md.gro")
-
+        if len(distances) < 2:
+            logger.warning("충분한 프레임 데이터가 없습니다")
+            final_distance=distances[-1] if distances else float('inf')
+            raise Exception("충분한 프레임 데이터가 없습니다")
         
-        # 최종 결과 파일 확인 및 거리 계산
-        if not os.path.exists(final_pdb_path):
-            failure_result['error'] = f"최종 결과 파일 누락: {final_pdb_path}"
-            return failure_result
+        # 선형 회귀로 기울기 계산 (SuMD 오리지널 방식)
+        slope = _calculate_distance_slope(distances)
+        is_decreasing = slope < -0.001  # 기울기 임계값 (SuMD 기준)
+        final_distance = distances[-1]
+        
+        logger.info(f"궤적 분석 완료: {len(distances)}개 프레임")
+        logger.info(f"기울기: {slope:.6f}, 감소 여부: {is_decreasing}")
+        logger.info(f"최종 거리: {final_distance:.3f} Å")
+        return slope, is_decreasing, distances, final_distance
+        
+    except Exception as e:
+        logger.error(f"궤적 분석 실패: {e}")
+        return slope, is_decreasing, distances, final_distance
 
-        # === 새로 추가: GRO 파일을 PDB로 변환 ===
-        if final_pdb_path.endswith('.gro'):
-            pdb_path = final_pdb_path.replace('.gro', '.pdb')
+def _extract_distances_from_trajectory_pdb(trajectory_pdb, original_pdb, receptor_chain, ligand_chain, logger, runner):
+    """멀티 모델 PDB에서 각 프레임별 거리 추출 - BioPython 직접 사용"""
+    distances = []
+    def extract_number_from_filename(filepath):
+        """파일명에서 숫자를 추출하여 정렬용 키로 사용"""
+        basename = os.path.basename(filepath)
+        numbers = re.findall(r'\d+', basename)
+        if numbers:
+            return int(numbers[-1])  # 마지막 숫자 사용
+        return float('inf')  # 숫자가 없으면 맨 뒤로
+    try:
+        from Bio.PDB import PDBParser
+        import numpy as np
+        import glob
+        
+        logger.info(f"BioPython으로 멀티모델 PDB 파싱 시작: {trajectory_pdb}")
+        
+        # 멀티모델 PDB 파싱
+        trajectory_list=glob.glob(os.path.join(os.path.dirname(trajectory_pdb),"trajectory*.pdb"))    
+        trajectory_list = sorted(trajectory_list, key=extract_number_from_filename)
 
-            # 구조 파일 결정 (em.tpr 또는 md.tpr)
-            tpr_file = "md.tpr"
+        # 각 모델별로 거리 계산
+        model_cnt = 0
+        for model in trajectory_list:
+            model_cnt += 1
             
-            success, msg = runner.execute_gromacs_command("trjconv", {
-                "structure_file": tpr_file,
-                "input_trajectory": os.path.basename(final_pdb_path),
-                "output_file": os.path.basename(pdb_path),
-                "pbc_option": "mol",
-                "group": "Protein"
-            })
-            
-            if success:
-                # 토폴로지 기반 체인 정보 복원
-                restored_pdb_path = pdb_path.replace('.pdb', '_restored.pdb')
-                chain_restored = runner.restore_chain_info_from_topology(
-                    pdb_path, processed_pdb, restored_pdb_path
+            try:
+                retore_success=runner.restore_chain_info_from_topology(model, original_pdb, model)
+                if not retore_success:
+                    logger.error('failed to make restore chain ID')
+                    raise Exception('failed to make restore chain ID')
+                
+                # Interface 기반 거리 계산 (자동 CoM fallback 포함)
+                distance = DistanceCalculator.calculate_chain_distance(
+                    model, receptor_chain, ligand_chain
                 )
                 
-                if chain_restored:
-                    final_pdb_path = restored_pdb_path
-                    logger.info(f"토폴로지 기반 체인 복원 성공: {os.path.basename(restored_pdb_path)}")
-                else:
-                    final_pdb_path = pdb_path
-                    logger.warning(f"체인 복원 실패, 기본 PDB 사용: {os.path.basename(pdb_path)}")
-            else:
-                failure_result['error'] = f"PDB 변환 실패: {msg}"
-                return failure_result
-        
-        final_distance = DistanceCalculator.calculate_chain_distance(final_pdb_path, receptor_chain, ligand_chain)
+                distances.append(distance)
+                logger.debug(f"모델 {model_cnt}: {distance:.3f}Å")
+                
+                # 개별 모델 파일 즉시 삭제
+                os.unlink(model)
+                
+            except Exception as e:
+                logger.warning(f"모델 {model_cnt} 처리 실패: {e}")
+                continue
 
-        # 성공 결과 반환
-        result_pdb_path = os.path.join(sample_dir, f"result_{sample_id}.pdb")
-        shutil.copy(final_pdb_path, result_pdb_path) # 최종 파일을 일관된 이름으로 복사
-
-        return {
-            'sample_id': sample_id, 'initial_distance': initial_distance, 'final_distance': final_distance,
-            'final_pdb': result_pdb_path, 'simulation_type': simulation_type, 'sample_dir': sample_dir,
-            'success': True
-        }
-
+            logger.info(f"총 {len(distances)}개 프레임에서 거리 추출 완료")
+            if distances:
+                logger.info(f"거리 범위: {min(distances):.3f} - {max(distances):.3f}Å")
+                logger.info("자동 Interface/CoM 선택 로직 적용됨")
+            
     except Exception as e:
-        logger.error(f"샘플 {sample_id} 실패: {e}")
-        failure_result['error'] = str(e)
-        return failure_result
+        logger.error(f"BioPython PDB 파싱 실패: {e}")
+        import traceback
+        logger.error(f"상세 오류: {traceback.format_exc()}")
+
+    finally:
+        # 임시 디렉토리 정리
+        try:
+            import shutil
+            # shutil.rmtree(os.path.dirname(trajectory_pdb))
+        except:
+            pass
+    return distances
+
+def _calculate_distance_slope(distances):
+    """거리 리스트에서 선형 회귀 기울기 계산 (SuMD 오리지널 방식)"""
+    if len(distances) < 2:
+        return 0.0
+    
+    n = len(distances)
+    x_values = list(range(n))
+    
+    # 선형 회귀: y = mx + b
+    x_mean = sum(x_values) / n
+    y_mean = sum(distances) / n
+    
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, distances))
+    denominator = sum((x - x_mean) ** 2 for x in x_values)
+    
+    if denominator == 0:
+        return 0.0
+    
+    slope = numerator / denominator
+    return slope
+
+def run_single_iteration_with_slope_analysis(sample_id, base_dir, processed_pdb, simulation_time, 
+                                           receptor_chain, ligand_chain, logger, system_size="medium", 
+                                           config_file=None, max_retries=100):
+    """
+    SuMD 오리지널 로직 구현: 한 iteration에서 하나의 MD만 수행하되 
+    기울기 분석으로 채택/거부 결정, 최대 100회 재시도
+    """
+    iteration_dir = base_dir
+    
+    logger.info(f"=== Iteration {sample_id} 시작 (최대 {max_retries}회 시도) ===")
+
+    for attempt in range(1, max_retries + 1):
+        logger.info(f"Iteration {sample_id}, 시도 {attempt}/{max_retries}")
+        
+        # 시도별 작업 디렉토리
+        attempt_dir = os.path.join(iteration_dir, f"attempt_{attempt}")
+        if os.path.exists(attempt_dir):
+            shutil.rmtree(attempt_dir)
+        os.makedirs(attempt_dir)
+        
+        try:
+            # 입력 파일 복사
+            input_pdb_path = os.path.join(attempt_dir, "input.pdb")
+            shutil.copy(processed_pdb, input_pdb_path)
+            
+            # MDP 파일들 생성
+            MDPGenerator.generate_em_mdp(os.path.join(attempt_dir, "em.mdp"), 0.1, system_size)
+            MDPGenerator.generate_nvt_mdp(os.path.join(attempt_dir, "nvt.mdp"), 0.1)  # 100ps
+            MDPGenerator.generate_npt_mdp(os.path.join(attempt_dir, "npt.mdp"), 0.1)  # 100ps  
+            MDPGenerator.generate_md_mdp(os.path.join(attempt_dir, "md.mdp"), simulation_time)  # 300ps
+            MDPGenerator.generate_ions_mdp(os.path.join(attempt_dir, "ions.mdp"), simulation_time)
+
+            runner = GromacsCommandRunner(attempt_dir, config_file, logger, system_size)
+            
+            # === GROMACS 파이프라인: EM -> NVT -> NPT -> MD ===
+            
+            # 1. pdb2gmx
+            success, msg = runner.try_multiple_force_fields({
+                "input_pdb": "input.pdb", 
+                "output_gro": "complex.gro", 
+                "output_top": "topol.top"
+            })
+            if not success:
+                logger.error(f"pdb2gmx 실패: {msg}")
+                continue
+
+            if attempt==1:
+                pass    
+
+            # 2. editconf  
+            success, msg = runner.execute_gromacs_command("editconf", {
+                "input_gro": "complex.gro", 
+                "output_gro": "box.gro"
+            })
+            if not success:
+                logger.error(f"editconf 실패: {msg}")
+                continue
+                
+            # 3. solvate
+            success, msg = runner.execute_gromacs_command("solvate", {
+                "input_gro": "box.gro", 
+                "output_gro": "solv.gro", 
+                "topology": "topol.top"
+            })
+            if not success:
+                logger.error(f"solvate 실패: {msg}")
+                continue
+                
+            # 4. grompp (ions)
+            success, msg = runner.execute_gromacs_command("grompp_ions", {
+                "mdp_file": "ions.mdp", 
+                "input_gro": "solv.gro", 
+                "topology": "topol.top", 
+                "output_tpr": "ions.tpr"
+            })
+            if not success:
+                logger.error(f"grompp_ions 실패: {msg}")
+                continue
+                
+            # 5. genion  
+            success, msg = runner.execute_gromacs_command("genion", {
+                "input_tpr": "ions.tpr", 
+                "output_gro": "solv_ions.gro", 
+                "topology": "topol.top"
+            })
+            if not success:
+                logger.error(f"genion 실패: {msg}")
+                continue
+                
+            # === EM 단계 ===
+            # 6. grompp (EM)
+            success, msg = runner.execute_gromacs_command("grompp_simulation", {
+                "mdp_file": "em.mdp", 
+                "input_gro": "solv_ions.gro", 
+                "topology": "topol.top", 
+                "output_tpr": "em.tpr"
+            })
+            if not success:
+                logger.error(f"grompp_em 실패: {msg}")
+                continue
+                
+            # 7. mdrun (EM)
+            success, msg = runner.execute_gromacs_command("mdrun_em", {"prefix": "em"})
+            if not success:
+                logger.error(f"mdrun_em 실패: {msg}")
+                continue
+                
+            # === NVT 평형 단계 ===
+            # 8. grompp (NVT)
+            success, msg = runner.execute_gromacs_command("grompp_nvt", {
+                "mdp_file": "nvt.mdp", 
+                "input_gro": "em.gro", 
+                "reference_gro": "em.gro",
+                "topology": "topol.top", 
+                "output_tpr": "nvt.tpr"
+            })
+            if not success:
+                logger.error(f"grompp_nvt 실패: {msg}")
+                continue
+                
+            # 9. mdrun (NVT)
+            success, msg = runner.execute_gromacs_command("mdrun_nvt", {"prefix": "nvt"})
+            if not success:
+                logger.error(f"mdrun_nvt 실패: {msg}")
+                continue
+                
+            # === NPT 평형 단계 ===
+            # 10. grompp (NPT)
+            success, msg = runner.execute_gromacs_command("grompp_npt", {
+                "mdp_file": "npt.mdp", 
+                "input_gro": "nvt.gro", 
+                "reference_gro": "nvt.gro",
+                "checkpoint_file": "nvt.cpt",
+                "topology": "topol.top", 
+                "output_tpr": "npt.tpr"
+            })
+            if not success:
+                logger.error(f"grompp_npt 실패: {msg}")
+                continue
+                
+            # 11. mdrun (NPT)
+            success, msg = runner.execute_gromacs_command("mdrun_npt", {"prefix": "npt"})
+            if not success:
+                logger.error(f"mdrun_npt 실패: {msg}")
+                continue
+                
+            # === MD 시뮬레이션 단계 ===
+            # 12. grompp (MD)
+            success, msg = runner.execute_gromacs_command("grompp_simulation", {
+                "mdp_file": "md.mdp", 
+                "input_gro": "npt.gro", 
+                "topology": "topol.top", 
+                "output_tpr": "md.tpr"
+            })
+            if not success:
+                logger.error(f"grompp_md 실패: {msg}")
+                continue
+                
+            # 13. mdrun (MD) - XTC 궤적 생성
+            success, msg = runner.execute_gromacs_command("mdrun_md", {"prefix": "md"})
+            if not success:
+                logger.error(f"mdrun_md 실패: {msg}")
+                continue
+                
+            # === 궤적 분석 및 기울기 판정 ===
+            xtc_file = os.path.join(attempt_dir, "md.xtc")
+            tpr_file = os.path.join(attempt_dir, "md.tpr")
+            
+            if not os.path.exists(xtc_file):
+                logger.error(f"XTC 파일 없음: {xtc_file}")
+                continue
+                
+            # SuMD 오리지널 기울기 분석
+            slope, is_decreasing, distances, final_distance = analyze_trajectory_slope(
+                runner, input_pdb_path, xtc_file, tpr_file, receptor_chain, ligand_chain, attempt_dir, logger
+            )
+            
+            if is_decreasing:
+                logger.info(f"✅ 기울기 채택! Slope: {slope:.6f} < 0")
+                logger.info(f"거리 변화: {distances[0]:.3f} → {final_distance:.3f} Å")
+                
+                gro_file = os.path.join(attempt_dir, "md.gro")
+                final_pdb = os.path.join(attempt_dir, "final_structure.pdb")
+
+                # MD 결과를 PDB로 변환
+                success, msg = runner.execute_gromacs_command("trjconv", {
+                    "structure_file": gro_file,
+                    "input_trajectory": gro_file, 
+                    "output_file": final_pdb,
+                    "pbc_option": "mol",
+                    "group": "Protein"
+                })
+
+                
+
+                final_pdb0 = os.path.join(attempt_dir, "final_structure0.pdb")
+                restore_success=runner.restore_chain_info_from_topology(final_pdb0, input_pdb_path, final_pdb0)
+                # 최종 구조 저장
+                final_pdb_path = os.path.join(iteration_dir, f"accepted_result.pdb")
+                
+                if restore_success and os.path.exists(final_pdb0):
+                    shutil.copy(final_pdb0, final_pdb_path)
+                    logger.info(f"✅ 체인 정보 복원 성공: {final_pdb0}")
+                
+                return {
+                    'sample_id': sample_id,
+                    'success': True,
+                    'attempt_count': attempt,
+                    'slope': slope,
+                    'initial_distance': distances[0] if distances else float('inf'),
+                    'final_distance': final_distance,
+                    'final_pdb': final_pdb_path,
+                    'distances_trajectory': distances,
+                    'is_converged': True,
+                    'sample_dir': attempt_dir
+                }
+            else:
+                logger.warning(f"❌ 기울기 거부. Slope: {slope:.6f} >= 0")
+                logger.info(f"시도 {attempt} 실패, 재시도 필요")
+                
+        except Exception as e:
+            logger.error(f"시도 {attempt} 중 예외 발생: {e}")
+            continue
+    
+    # 모든 시도 실패
+    logger.error(f"Iteration {sample_id}: {max_retries}회 시도 모두 실패")
+    return {
+        'sample_id': sample_id,
+        'success': False,
+        'attempt_count': max_retries,
+        'slope': 0.0,
+        'initial_distance': float('inf'),
+        'final_distance': float('inf'),
+        'final_pdb': None,
+        'is_converged': False,
+        'error': f'Maximum {max_retries} attempts exceeded'
+    }
 
 # ===== 기존 다중 샘플 실행 함수 유지 =====
 def run_multi_sample_iteration_with_results_saving(processed_pdb, iter_dir, simulation_time, receptor_chain, ligand_chain, 
@@ -715,7 +958,6 @@ def main():
     parser.add_argument("--rmsd_threshold", type=float, default=1.5, help="수렴 판정 RMSD 임계값 (Å)")
     parser.add_argument("--convergence_window", type=int, default=5, help="수렴 판정 윈도우 크기")
     parser.add_argument("--max_iterations", type=int, default=10, help="최대 반복 횟수")
-    parser.add_argument("--num_samples", type=int, default=5, help="각 반복당 샘플 수")
     parser.add_argument("--max_retry_per_iteration", type=int, default=100, help="각 iteration당 최대 재시도 횟수")  # 새로 추가
     parser.add_argument("--job_id", help="작업 ID (자동생성)")
     parser.add_argument("--skip_preprocessing", action="store_true", help="전처리 건너뛰기")
@@ -784,153 +1026,103 @@ def main():
     
     current_pdb = args.input_pdb
     original_pdb = args.input_pdb  # 원본 PDB 보존
-    
+    iteration=0
     # 시작 PDB와 Golden Standard 간의 초기 RMSD 계산
     initial_rmsd = convergence_checker.calculate_rmsd_with_golden_standard(current_pdb)
     logger.info(f"초기 RMSD (vs Golden Standard): {initial_rmsd:.3f}Å")
     
     try:
-        for iteration in range(1, args.max_iterations + 1):
+        while(iteration < args.max_iterations):
+            iteration+=1
             logger.info(f"\n=== 반복 {iteration} 시작 ===")
+                
+            # 반복별 작업 디렉토리 (재시도 고려)
+            iter_dir = os.path.join(job_output_dir, f"iteration_{iteration}")
+            if os.path.exists(iter_dir):
+                shutil.rmtree(iter_dir)
+            os.makedirs(iter_dir, exist_ok=True)
             
-            retry_count = 0  # 현재 iteration의 재시도 횟수
-            iteration_success = False
-            current_distance = None
+            # 1. PDB 전처리
+            processed_pdb = None
             
-            # 각 iteration마다 재시도 루프
-            while retry_count <= args.max_retry_per_iteration and not iteration_success:
-                
-                if retry_count > 0:
-                    logger.info(f"=== 반복 {iteration} - 재시도 {retry_count}회차 ===")
-                
-                # 재시도 횟수가 100회를 넘으면 원본으로 돌아가기
-                if retry_count > args.max_retry_per_iteration:
-                    logger.warning(f"반복 {iteration} 최대 재시도 횟수({args.max_retry_per_iteration}) 초과")
-                    logger.info("원본 PDB로 돌아가서 다시 시작합니다")
-                    current_pdb = original_pdb
-                    retry_count = 0  # 재시도 카운터 리셋
-                    continue
-                
-                # 반복별 작업 디렉토리 (재시도 고려)
-                if retry_count == 0:
-                    iter_dir = os.path.join(job_output_dir, f"iteration_{iteration}")
-                else:
-                    iter_dir = os.path.join(job_output_dir, f"iteration_{iteration}_retry_{retry_count}")
-                os.makedirs(iter_dir, exist_ok=True)
-                
-                # 1. PDB 전처리
-                processed_pdb = None
-                
-                if not args.skip_preprocessing:
-                    logger.info("PDB 전처리 시작")
-                    try:
-                        processed_pdb, stats = process_pdb_for_gromacs(
-                            current_pdb, 
-                            os.path.join(iter_dir, "processed.pdb"),
-                            [args.receptor_chain, args.ligand_chain],
-                            logger
-                        )
-                        logger.info(f"전처리 통계: {stats}")
-                    except Exception as e:
-                        logger.error(f"전처리 실패: {e}")
-                        processed_pdb = os.path.join(iter_dir, "processed.pdb")
-                        shutil.copy(current_pdb, processed_pdb)
-                        logger.warning("원본 PDB 파일로 계속 진행합니다")
-                else:
+            if not args.skip_preprocessing:
+                logger.info("PDB 전처리 시작")
+                try:
+                    processed_pdb, stats = process_pdb_for_gromacs(
+                        current_pdb, 
+                        os.path.join(iter_dir, "processed.pdb"),
+                        [args.receptor_chain, args.ligand_chain],
+                        logger
+                    )
+                    logger.info(f"전처리 통계: {stats}")
+                except Exception as e:
+                    logger.error(f"전처리 실패: {e}")
                     processed_pdb = os.path.join(iter_dir, "processed.pdb")
                     shutil.copy(current_pdb, processed_pdb)
-                    logger.info("전처리 건너뛰고 원본 PDB 사용")
-                
-                if not processed_pdb or not os.path.exists(processed_pdb):
-                    logger.error("PDB 준비가 완전히 실패했습니다")
-                    break
-                
-                # 2. 초기 거리 계산
-                try:
-                    initial_distance = DistanceCalculator.calculate_chain_distance(
-                        processed_pdb, args.receptor_chain, args.ligand_chain
-                    )
-                    logger.info(f"초기 체인 간 거리: {initial_distance:.2f} Å")
-                    
-                    # 첫 번째 시도가 아니면 현재 거리와 비교
-                    if current_distance is None:
-                        current_distance = initial_distance
-                        
-                except Exception as e:
-                    logger.error(f"거리 계산 실패: {e}")
-                    retry_count += 1
-                    continue
-                
-                # 3. 다중 샘플 시뮬레이션 실행 (300ps 고정)
-                best_sample, all_samples = run_multi_sample_iteration_with_results_saving(
-                    processed_pdb, iter_dir, args.simulation_time,  # 300ps 사용
-                    args.receptor_chain, args.ligand_chain, args.distance_threshold,
-                    args.num_samples, logger, system_size, args.config_file,
-                    iteration_num=iteration, job_output_dir=job_output_dir
-                )
-                
-                if best_sample is None:
-                    logger.error(f"반복 {iteration} 재시도 {retry_count}에서 모든 샘플이 실패했습니다")
-                    retry_count += 1
-                    continue
-                
-                # 4. 거리 개선 확인
-                final_distance = best_sample['final_distance']
-                distance_improvement = current_distance - final_distance
-                
-                logger.info(f"거리 변화: {current_distance:.2f}Å → {final_distance:.2f}Å (개선: {distance_improvement:.2f}Å)")
-                
-                # 5. 거리가 개선되었는지 확인
-                if distance_improvement > 0.1:  # 0.1Å 이상 개선되면 성공
-                    logger.info(f"✅ 거리 개선 성공! {distance_improvement:.2f}Å 가까워짐")
-                    iteration_success = True
-                    current_distance = final_distance
-                    current_pdb = best_sample['final_pdb']  # 다음 iteration의 시작점으로 설정
-                    
-                    # Golden Standard와의 RMSD 계산
-                    rmsd_vs_golden = convergence_checker.add_rmsd(best_sample['final_pdb'])
-                    logger.info(f"Golden Standard와의 RMSD: {rmsd_vs_golden:.3f} Å")
-                    
-                    converged, avg_rmsd, status_msg = convergence_checker.check_convergence()
-                    logger.info(f"수렴 상태: {status_msg}")
-                    
-                    # 결과 저장
-                    iteration_result = {
-                        "iteration": iteration,
-                        "retry_count": retry_count,
-                        "initial_distance": initial_distance,
-                        "final_distance": final_distance,
-                        "distance_improvement": distance_improvement,
-                        "rmsd_vs_golden": rmsd_vs_golden,
-                        "best_sample_id": best_sample['sample_id'],
-                        "simulation_type": best_sample['simulation_type'],
-                        "final_pdb": best_sample['final_pdb'],
-                        "successful_samples": len([s for s in all_samples if s['success']]),
-                        "failed_samples": len([s for s in all_samples if not s['success']]),
-                        "simulation_time_ns": args.simulation_time
-                    }
-                    results["iterations"].append(iteration_result)
-                    
-                    if converged:
-                        logger.info(f"수렴 달성! Golden Standard와의 마지막 {args.convergence_window}회 평균 RMSD {avg_rmsd:.3f}Å ≤ {args.rmsd_threshold}Å")
-                        results["converged"] = True
-                        results["final_pdb"] = best_sample['final_pdb']
-                        results["convergence_info"] = convergence_checker.get_convergence_info()
-                        break  # 전체 시뮬레이션 종료
-                    
-                else:
-                    logger.warning(f"❌ 거리 개선 부족: {distance_improvement:.2f}Å (임계값: 0.1Å)")
-                    logger.info(f"재시도 {retry_count + 1}회차를 준비합니다")
-                    retry_count += 1
-                    # current_pdb는 그대로 유지 (개선되지 않았으므로)
+                    logger.warning("원본 PDB 파일로 계속 진행합니다")
+            else:
+                processed_pdb = os.path.join(iter_dir, "processed.pdb")
+                shutil.copy(current_pdb, processed_pdb)
+                logger.info("전처리 건너뛰고 원본 PDB 사용")
             
-            # iteration 재시도 루프 종료
-            if not iteration_success:
-                logger.error(f"반복 {iteration}이 최대 재시도 후에도 실패했습니다")
+            if not processed_pdb or not os.path.exists(processed_pdb):
+                logger.error("PDB 준비가 완전히 실패했습니다")
                 break
+            
+            # 2. 초기 거리 계산
+            try:
+                initial_distance = DistanceCalculator.calculate_chain_distance(
+                    processed_pdb, args.receptor_chain, args.ligand_chain
+                )
+                logger.info(f"초기 체인 간 거리: {initial_distance:.2f} Å")
+                    
+            except Exception as e:
+                logger.error(f"거리 계산 실패: {e}")
+                continue
+            
+            # 기존의 다중 샘플 실행 대신 단일 iteration 실행
+            iteration_result = run_single_iteration_with_slope_analysis(
+                iteration, iter_dir, processed_pdb, args.simulation_time,
+                args.receptor_chain, args.ligand_chain, logger, system_size, args.config_file,
+                max_retries=args.max_retry_per_iteration
+            )
+            
+            if not iteration_result['success']:
+                logger.error(f"반복 {iteration}이 100회 시도 후에도 실패했습니다")
+                iteration=0
+                continue
+            
+            logger.info(f"✅ Iteration {iteration} 성공!")
+            logger.info(f"시도 횟수: {iteration_result['attempt_count']}")
+            logger.info(f"최종 거리: {iteration_result['final_distance']:.3f} Å")
+            
+            current_pdb = iteration_result['final_pdb']
+            
+            # Golden Standard와의 RMSD 계산
+            rmsd_vs_golden = convergence_checker.add_rmsd(current_pdb)
+            logger.info(f"Golden Standard와의 RMSD: {rmsd_vs_golden:.3f} Å")
+            
+            converged, avg_rmsd, status_msg = convergence_checker.check_convergence()
+            results["converged"] = converged
+            logger.info(f"수렴 상태: {status_msg}")
+            
+            # 결과 저장
+            iteration_result_data = {
+                "iteration": iteration,
+                "attempt_count": iteration_result['attempt_count'],
+                "slope": iteration_result['slope'],
+                "initial_distance": iteration_result['initial_distance'],
+                "final_distance": iteration_result['final_distance'],
+                "rmsd_vs_golden": rmsd_vs_golden,
+                "final_pdb": iteration_result['final_pdb'],
+                "simulation_time_ns": args.simulation_time,
+                "distances_trajectory": iteration_result.get('distances_trajectory', [])
+            }
+            results["iterations"].append(iteration_result_data)
             
             # 수렴했으면 전체 루프 종료
             if results.get("converged", False):
+                results["avg_rmsd"] = avg_rmsd
                 break
         
         # 최종 결과 처리
@@ -951,10 +1143,6 @@ def main():
         logger.info(f"수렴 여부: {results['converged']}")
         logger.info(f"총 반복 횟수: {len(results['iterations'])}")
         logger.info(f"300ps 고정 시간 시뮬레이션으로 실행됨")
-        
-        # 재시도 통계 출력
-        total_retries = sum([iter_result.get("retry_count", 0) for iter_result in results["iterations"]])
-        logger.info(f"총 재시도 횟수: {total_retries}")
         
         if 'convergence_info' in results:
             conv_info = results['convergence_info']
