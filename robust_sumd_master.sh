@@ -13,16 +13,15 @@ SIMULATION_TIME=${5:-0.3}            # 시뮬레이션 시간 (ns, 기본값: 0.
 DISTANCE_THRESHOLD=${6:-5.0}         # 동작 임계거리 (Å, 기본값: 5.0)
 RMSD_THRESHOLD=${7:-1.5}             # Golden Standard와의 RMSD 임계값 (Å, 기본값: 1.5)
 MAX_ITERATIONS=${8:-10}              # 최대 반복 횟수 (기본값: 10)
-NUM_SAMPLES=${9:-5}                  # 각 반복당 샘플 수 (기본값: 5)
+MAX_RETRY_PER_ITERATION=${9:-100}    # 각 iteration당 최대 재시도 횟수 (기본값: 100)
 OUTPUT_DIR=${10:-"/app/output"}      # 출력 디렉토리
 JOB_ID=${11:-""}                     # 작업 ID (기본값: 자동생성)
 SKIP_PREPROCESSING=${12:-"false"}    # 전처리 건너뛰기 (기본값: false)
-MAX_RETRY_PER_ITERATION=${13:-100}   # 각 iteration당 최대 재시도 횟수 (기본값: 100)  ⭐ 새로 추가
 
 # 인자 확인 - 수정된 부분
 if [ -z "$INPUT_PDB" ] || [ -z "$GOLDEN_STANDARD_PDB" ] || [ -z "$RECEPTOR_CHAIN" ] || [ -z "$LIGAND_CHAIN" ]; then
     echo "사용법: $0 <입력_PDB> <Golden_Standard_PDB> <수용체_체인> <리간드_체인> [시뮬레이션_시간] [거리_임계값] [RMSD_임계값] [최대_반복] [샘플수] [출력_디렉토리] [작업_ID] [전처리_건너뛰기] [최대_재시도]"
-    echo "예시: $0 displaced_complex.pdb native_complex.pdb A B 0.3 5.0 1.5 10 5 /app/output \"\" false 100"
+    echo "예시: $0 displaced_complex.pdb native_complex.pdb A B 0.3 5.0 1.5 2000 100 /app/output \"\" false 100"
     echo ""
     echo "개선된 거리 기반 반복 SuMD 시뮬레이션 설정:"
     echo "  - 입력 PDB: 변형된 구조 (chain이 이동/회전된 상태)"
@@ -157,7 +156,6 @@ echo "시뮬레이션 시간: $SIMULATION_TIME ns (300ps 고정)"  # 수정됨
 echo "거리 임계값: $DISTANCE_THRESHOLD Å"
 echo "RMSD 임계값 (vs Golden): $RMSD_THRESHOLD Å"
 echo "최대 반복 횟수: $MAX_ITERATIONS"
-echo "각 반복당 샘플 수: $NUM_SAMPLES"
 echo "최대 재시도 횟수: $MAX_RETRY_PER_ITERATION"  # 새로 추가
 echo "출력 디렉토리: $FINAL_OUTPUT_DIR"
 echo "시스템 크기: $SYSTEM_SIZE (원자수: $INPUT_ATOM_COUNT)"
@@ -213,7 +211,6 @@ RESULT=$(python3 "$PYTHON_SCRIPT" \
     --distance_threshold "$DISTANCE_THRESHOLD" \
     --rmsd_threshold "$RMSD_THRESHOLD" \
     --max_iterations "$MAX_ITERATIONS" \
-    --num_samples "$NUM_SAMPLES" \
     --max_retry_per_iteration "$MAX_RETRY_PER_ITERATION" \
     --job_id "$JOB_ID" \
     --config_file /app/SUMD_automation/gromacs_commands_config.json \
@@ -295,7 +292,6 @@ else
         --distance_threshold "$DISTANCE_THRESHOLD" \
         --rmsd_threshold "$RMSD_THRESHOLD" \
         --max_iterations "$MAX_ITERATIONS" \
-        --num_samples "$NUM_SAMPLES" \
         --max_retry_per_iteration "$MAX_RETRY_PER_ITERATION" \
         --job_id "$JOB_ID" \
         --config_file /app/SUMD_automation/gromacs_commands_config.json \
@@ -326,7 +322,6 @@ echo "  ✓ 거리 개선 (>0.1Å)이 있을 때만 다음 단계 진행"
 echo "  ✓ 개선 없으면 최대 ${MAX_RETRY_PER_ITERATION}회 재시도"
 echo "  ✓ 재시도 한계 초과시 원본으로 자동 리셋"
 echo "  ✓ Golden Standard 기반 절대적 수렴 판정"
-echo "  ✓ 각 iteration마다 ${NUM_SAMPLES}개 샘플 병렬 처리"
 echo "  ✓ 적응형 시뮬레이션 (거리 기반 EM/EM+MD 선택)"
 echo "=========================================="
 
