@@ -240,6 +240,8 @@ class GromacsCommandRunner:
             for file_template in cmd_config["output_files"]:
                 try:
                     output_file = self._substitute_parameters(file_template, full_params)
+                    if command_name=='trjconv':
+                        output_file = output_file.split('.')[0]+'0.pdb'
                     output_files.append(output_file)
                 except:
                     pass  # 파라미터 치환 실패 시 무시
@@ -275,7 +277,7 @@ class GromacsCommandRunner:
                 return False, f"{command_name} 최종 실패: {message}"
         
         return False, "예상치 못한 오류"
-    
+
     def try_multiple_force_fields(self, base_parameters: Dict[str, Any]) -> Tuple[bool, str]:
         """여러 포스필드로 pdb2gmx 시도"""
         
