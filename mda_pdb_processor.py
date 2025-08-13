@@ -10,11 +10,11 @@ from typing import List, Optional, Tuple
 
 # 새로운 PDB Fixer import
 try:
-    from improved_pdb_fixer import fix_pdb_for_gromacs, GromacsCompatibleProcessor
+    from pdb_fixer import fix_pdb_for_gromacs
     ADVANCED_FIXER_AVAILABLE = True
 except ImportError:
     ADVANCED_FIXER_AVAILABLE = False
-    print("경고: improved_pdb_fixer 모듈을 찾을 수 없습니다. 기본 처리기를 사용합니다.")
+    print("경고: pdb_fixer 모듈을 찾을 수 없습니다. 기본 처리기를 사용합니다.")
 
 class AdvancedPDBProcessor:
     """MDAnalysis를 중심으로 한 고급 PDB 전처리 클래스 - 개선된 버전"""
