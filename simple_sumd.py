@@ -611,6 +611,78 @@ def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_outpu
     except Exception as e:
         log(f"명령어 실행 실패: {e}")
         return False
+    
+def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_output=[], timeout=3600, max_retries=2, is_long_md=False):
+    """GROMACS mdrun을 checkpoint 복구 기능과 함께 실행"""
+    attempt = 0
+    
+    while attempt <= max_retries:
+        try:
+            if attempt == 0:
+                # 첫 번째 시도 - 일반 실행
+                log(f"MD 실행 시도 {attempt + 1}/{max_retries + 1}")
+                result = subprocess.run(
+                    cmd, shell=True, cwd=cwd, 
+                    input=input_text.encode() if input_text else None,
+                    capture_output=True, text=True, timeout=timeout
+                )
+            else:
+                # 재시작 시도 - checkpoint 파일 확인
+                checkpoint_files = []
+                for output_file in expected_output:
+                    base_name = output_file.replace('.gro', '').replace('.xtc', '')
+                    checkpoint_file = os.path.join(cwd, f"{base_name}.cpt")
+                    if os.path.exists(checkpoint_file):
+                        checkpoint_files.append(checkpoint_file)
+                
+                if not checkpoint_files:
+                    log(f"재시작 시도 {attempt}: checkpoint 파일을 찾을 수 없음")
+                    break
+                
+                # checkpoint에서 재시작하는 명령어 구성
+                restart_cmd = cmd + " -cpi"
+                log(f"MD 재시작 시도 {attempt + 1}/{max_retries + 1} (checkpoint에서)")
+                log(f"재시작 명령어: {restart_cmd}")
+                
+                result = subprocess.run(
+                    restart_cmd, shell=True, cwd=cwd,
+                    capture_output=True, text=True, timeout=timeout
+                )
+            
+            # 실행 결과 확인
+            if result.returncode == 0:
+                # 출력 파일 존재 확인
+                all_files_exist = True
+                for output_file in expected_output:
+                    full_path = os.path.join(cwd, output_file)
+                    if not os.path.exists(full_path) or os.path.getsize(full_path) == 0:
+                        all_files_exist = False
+                        break
+                
+                if all_files_exist:
+                    log(f"MD 실행 성공 (시도 {attempt + 1})")
+                    return True
+                else:
+                    log(f"MD 실행 후 출력 파일 확인 실패 (시도 {attempt + 1})")
+            else:
+                log(f"MD 실행 실패 (시도 {attempt + 1}): Return code {result.returncode}")
+                log(f"Error: {result.stderr}")
+            
+        except subprocess.TimeoutExpired:
+            log(f"MD 실행 시간 초과 (시도 {attempt + 1}/{max_retries + 1})")
+            if is_long_md:
+                log(f"Long MD 시간 초과 - 다음 시도에서 checkpoint 복구 시도")
+        except Exception as e:
+            log(f"MD 실행 중 예외 발생 (시도 {attempt + 1}): {e}")
+        
+        attempt += 1
+        
+        if attempt <= max_retries:
+            log(f"다음 시도까지 5초 대기...")
+            time.sleep(5)
+    
+    log(f"MD 실행 최종 실패: {max_retries + 1}회 시도 모두 실패")
+    return False
 
 def create_mdp_files(work_dir, long_md=False):
     """MDP 파일들 생성 - SD integrator 및 랜덤 시드 적용"""
@@ -831,7 +903,8 @@ def run_gromacs_pipeline(work_dir, input_pdb, long_md=False):
     
     # 1. pdb2gmx
     log("pdb2gmx 실행")
-    cmd = f"echo '1\\n1' | gmx pdb2gmx -f {input_pdb} -o complex.gro -p topol.top -water {WATER_MODEL} -ff {FORCE_FIELD} -ignh"
+    cmd = f"echo '1\\n1' | gmx pdb2gmx -f {input_pdb} -o complex.gro -p topol.top \
+          -water {WATER_MODEL} -ff {FORCE_FIELD} -ignh"
     success = run_command_with_output_check(cmd, work_dir, expected_output=["complex.gro", "topol.top"])
     stages.append({"stage": "pdb2gmx", "success": success})
     if not success:
@@ -890,7 +963,8 @@ pbc = xyz
     cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
     success = run_command_with_output_check(cmd, work_dir, expected_output="em.tpr")
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm em -ntomp {NTOMP} -nb gpu -gpu_id {GPU_ID}"
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm em -ntomp {NTOMP} \
+              -nb gpu -gpu_id {GPU_ID}"
         success = run_command_with_output_check(cmd, work_dir, expected_output=["em.gro", "em.edr"])
     stages.append({"stage": "em", "success": success})
     if not success:
@@ -901,7 +975,8 @@ pbc = xyz
     cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
     success = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} \
+              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
         success = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
     stages.append({"stage": "nvt", "success": success})
     if not success:
@@ -912,7 +987,8 @@ pbc = xyz
     cmd = f"gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt.tpr -maxwarn {MAX_WARNINGS}"
     success = run_command_with_output_check(cmd, work_dir, expected_output="npt.tpr")
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt -ntomp {NTOMP} -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt -ntomp {NTOMP} \
+              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
         success = run_command_with_output_check(cmd, work_dir, expected_output=["npt.gro", "npt.cpt"])
     stages.append({"stage": "npt", "success": success})
     if not success:
@@ -925,8 +1001,17 @@ pbc = xyz
     success = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
     if success:
         timeout = TIMEOUT_LONG_MD if long_md else 3600
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md -ntomp {NTOMP} -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
-        success = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout)
+        max_retries = 2 if long_md else 0  # Long MD만 재시작 시도
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md -ntomp {NTOMP} \
+        -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+        if long_md:
+            log(f"{md_label} - checkpoint 복구 기능 활성화 (최대 {max_retries}회 재시작)")
+            success = run_mdrun_with_checkpoint_recovery(
+                cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout, max_retries=max_retries, is_long_md=True
+            )
+        else:
+            success = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout)
+    
     stages.append({"stage": md_label, "success": success})
     
     return stages
