@@ -1,10 +1,15 @@
 # Simple SuMD 설정 파일 (체인 복원 기능 포함)
 
 # ===== 시뮬레이션 기본 설정 =====
-MAX_ITERATIONS = 100          # 최대 iteration 수
-MAX_ATTEMPTS = 100           # iteration당 최대 attempt 수
-SIMULATION_TIME_NS = 0.3     # MD 시뮬레이션 시간 (ns) - 300ps
-ENABLE_CHAIN_RESTORATION = False
+MAX_ITERATIONS = 2          # 최대 iteration 수 default 100
+MAX_ATTEMPTS = 10           # iteration당 최대 attempt 수 default 100
+SIMULATION_TIME_NS = 0.3     # MD 시뮬레이션 시간 (ns) - 300ps default 0.3
+ENABLE_CHAIN_RESTORATION = False # default False
+SAVE_TOP_N=5                # default 5
+DISTANCE_WEIGHT = 0.6    # 조합점수에서 거리의 가중치
+RMSD_WEIGHT = 0.4        # 조합점수에서 RMSD의 가중치
+MAX_REASONABLE_DISTANCE = 50.0  # 거리 정규화 기준값
+MAX_REASONABLE_RMSD = 10.0      # RMSD 정규화 기준값
 
 # 기울기 임계값 (음수여야 채택)
 SLOPE_THRESHOLD = -0.001
@@ -31,7 +36,7 @@ MAX_ROTATION_VARIANTS = 2           # 최대 회전 변형 수
 STRUCTURE_ROTATION = 60
 
 # ===== GROMACS 설정 =====
-GPU_ID = "0123"                 #  사용할 GPU ID
+GPU_ID = "1"                 #  사용할 GPU ID
 MPI_RANKS = "4"              # MPI 랭크 수
 NTOMP = "2"                  # OpenMP 스레드 수
 FORCE_FIELD = "charmm36-jul2022"  # Force field

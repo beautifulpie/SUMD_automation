@@ -848,6 +848,240 @@ pbc = xyz
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
+def get_chains_by_size(structure):
+    """구조의 chain들을 크기 순으로 정렬하여 반환"""
+    chain_info = []
+    for model in structure:
+        for chain in model:
+            atom_count = len(list(chain.get_atoms()))
+            chain_info.append((chain.id, atom_count, chain))
+    
+    # 크기 순 정렬 (작은 것부터)
+    chain_info.sort(key=lambda x: x[1])
+    return chain_info[:1]
+
+def calculate_rmsd_between_structures(pdb1, pdb2):
+    """두 PDB 구조 간의 RMSD 계산 (단백질만)"""
+    try:
+        from Bio.PDB import PDBParser, Superimposer
+        import numpy as np
+        
+        parser = PDBParser(QUIET=True)
+        structure1 = parser.get_structure("struct1", pdb1)
+        structure2 = parser.get_structure("struct2", pdb2)
+
+        # Chain ID를 기준으로 매칭 (순서 무관)
+        chains1_info = get_chains_by_size(structure1)  # [(H, 100, chainH), (L, 300, chainL)]
+        chains2_info = get_chains_by_size(structure2)  # [(A, 100, chainA), (B, 300, chainB)]
+
+        if len(chains1_info) != len(chains2_info):
+            log(f"Chain 개수 불일치: {len(chains1_info)} vs {len(chains2_info)}")
+            return float('inf')
+        
+        if len(chains1_info) < 2:
+            log("비교할 chain이 충분하지 않음")
+            return float('inf')
+        
+        log(f"Reference chains: {[(info[0], info[1]) for info in chains1_info]}")
+        log(f"Target chains: {[(info[0], info[1]) for info in chains2_info]}")
+        
+        # 크기 순서대로 매칭 (ligand끼리, receptor끼리)
+        atoms1 = []
+        atoms2 = []
+        
+        for (id1, size1, chain1), (id2, size2, chain2) in zip(chains1_info, chains2_info):
+            log(f"매칭: {id1}({size1} atoms) <-> {id2}({size2} atoms)")
+            
+            # 각 chain의 residue들을 정렬
+            residues1 = sorted(chain1.get_residues(), key=lambda r: r.id)
+            residues2 = sorted(chain2.get_residues(), key=lambda r: r.id)
+            
+            # Residue ID 기준 매칭 (번호 기준)
+            res_dict1 = {r.id[1]: r for r in residues1}  # residue number만 사용
+            res_dict2 = {r.id[1]: r for r in residues2}
+            
+            common_res_nums = set(res_dict1.keys()) & set(res_dict2.keys())
+            
+            for res_num in sorted(common_res_nums):
+                residue1 = res_dict1[res_num]
+                residue2 = res_dict2[res_num]
+                
+                # CA 원자가 둘 다 있는 경우만
+                if 'CA' in residue1 and 'CA' in residue2:
+                    atoms1.append(residue1['CA'])
+                    atoms2.append(residue2['CA'])
+        
+        if len(atoms1) != len(atoms2) or len(atoms1) < 3:
+            log(f"RMSD 계산 실패: 대응되는 CA 원자 부족 ({len(atoms1)} vs {len(atoms2)})")
+            return float('inf')
+        
+        # Superimposer를 사용하여 RMSD 계산
+        super_imposer = Superimposer()
+        super_imposer.set_atoms(atoms1, atoms2)
+        rmsd = super_imposer.rms
+        
+        log(f"크기 기준 RMSD 계산 성공: {rmsd:.3f}Å (CA 원자 {len(atoms1)}개)")
+        return float(rmsd)
+        
+    except Exception as e:
+        log(f"크기 기준 RMSD 계산 중 오류: {e}")
+        import traceback
+        log(f"상세 오류: {traceback.format_exc()}")
+        return float('inf')
+
+def calculate_combined_score(distance, rmsd, distance_weight=0.6, rmsd_weight=0.4):
+    """거리와 RMSD를 조합한 점수 계산 (낮을수록 좋음)"""
+    try:
+        # 정규화를 위한 기준값들
+        max_reasonable_distance = 50.0  # 50Å
+        max_reasonable_rmsd = 10.0      # 10Å
+        
+        # 0-1로 정규화
+        norm_distance = min(distance / max_reasonable_distance, 1.0)
+        norm_rmsd = min(rmsd / max_reasonable_rmsd, 1.0)
+        
+        # 가중 평균 계산
+        combined_score = 1 - (distance_weight * norm_distance + rmsd_weight * norm_rmsd)
+        
+        return combined_score
+        
+    except Exception as e:
+        log(f"점수 계산 중 오류: {e}")
+        return float('inf')
+
+
+def extract_distances_and_top_structures_with_rmsd(tpr_file, xtc_file, binding_site_residues, 
+                                                  work_dir, reference_pdb, save_top_n=5):
+    """궤적에서 거리와 RMSD를 고려한 Top N 구조 저장"""
+    try:
+        # 궤적을 개별 PDB 파일로 변환
+        cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {xtc_file} -o trajectory.pdb -sep"
+        if not run_command_with_output_check(cmd, work_dir, expected_output="trajectory0.pdb"):
+            log("궤적 변환 실패")
+            return [], []
+        
+        structures_with_scores = []  # (frame_num, distance, rmsd, combined_score, pdb_file) 튜플 리스트
+        frame_num = 0
+        
+        log("프레임별 거리 및 RMSD 계산 시작...")
+        
+        while True:
+            frame_pdb = os.path.join(work_dir, f"trajectory{frame_num}.pdb")
+            if not os.path.exists(frame_pdb):
+                break
+            
+            if os.path.getsize(frame_pdb) == 0:
+                log(f"빈 프레임 파일: trajectory{frame_num}.pdb")
+                break
+            
+            # 거리 계산
+            distance = calculate_distance_binding_site(frame_pdb, binding_site_residues)
+            if distance == float('inf'):
+                frame_num += 1
+                continue
+            
+            # RMSD 계산 (reference 구조 대비)
+            rmsd = calculate_rmsd_between_structures(reference_pdb, frame_pdb)
+            if rmsd == float('inf'):
+                log(f"Frame {frame_num}: RMSD 계산 실패, 거리만 사용")
+                rmsd = 0.0  # RMSD 계산 실패시 거리만 고려
+            
+            # 조합 점수 계산
+            combined_score = calculate_combined_score(distance, rmsd)
+            
+            structures_with_scores.append((frame_num, distance, rmsd, combined_score, frame_pdb))
+            
+            if frame_num % 50 == 0:  # 진행상황 로그
+                log(f"Frame {frame_num}: 거리={distance:.2f}Å, RMSD={rmsd:.2f}Å, 점수={combined_score:.4f}")
+            
+            frame_num += 1
+        
+        log(f"총 {len(structures_with_scores)}개 프레임에서 거리 및 RMSD 추출")
+        
+        # Top N 구조 찾기 (조합 점수 기준으로 정렬)
+        top_structures = []
+        if structures_with_scores:
+            # 조합 점수 순으로 정렬 (낮을수록 좋음)
+            sorted_structures = sorted(structures_with_scores, key=lambda x: x[3])
+            top_n = min(save_top_n, len(sorted_structures))
+            
+            log(f"Top {top_n} 구조 저장 중...")
+            
+            for i in range(top_n):
+                frame_num, distance, rmsd, combined_score, frame_pdb = sorted_structures[i]
+                
+                # Top 구조 저장
+                top_structure_name = f"top_{i+1}_frame_{frame_num}_dist_{distance:.2f}A_rmsd_{rmsd:.2f}A_score_{combined_score:.4f}.pdb"
+                top_structure_path = os.path.join(work_dir, top_structure_name)
+                
+                try:
+                    shutil.copy(frame_pdb, top_structure_path)
+                    
+                    structure_info = {
+                        'rank': i + 1,
+                        'frame': frame_num,
+                        'distance': distance,
+                        'rmsd': rmsd,
+                        'combined_score': combined_score,
+                        'filename': top_structure_name,
+                        'path': top_structure_path,
+                        'distance_rank': None,  # 나중에 계산
+                        'rmsd_rank': None       # 나중에 계산
+                    }
+                    top_structures.append(structure_info)
+                    
+                    log(f"Top {i+1}: Frame {frame_num}, 거리 {distance:.2f}Å, RMSD {rmsd:.2f}Å, 점수 {combined_score:.4f}")
+                    
+                except Exception as e:
+                    log(f"Top 구조 저장 실패 (rank {i+1}): {e}")
+            
+            # 개별 랭킹 정보 추가 (참고용)
+            distance_sorted = sorted(structures_with_scores, key=lambda x: x[1])
+            rmsd_sorted = sorted(structures_with_scores, key=lambda x: x[2])
+            
+            for struct_info in top_structures:
+                frame_num = struct_info['frame']
+                
+                # 거리 랭킹 찾기
+                for rank, (f_num, _, _, _, _) in enumerate(distance_sorted, 1):
+                    if f_num == frame_num:
+                        struct_info['distance_rank'] = rank
+                        break
+                
+                # RMSD 랭킹 찾기
+                for rank, (f_num, _, _, _, _) in enumerate(rmsd_sorted, 1):
+                    if f_num == frame_num:
+                        struct_info['rmsd_rank'] = rank
+                        break
+        
+        # 임시 frame 파일들 정리
+        frame_num = 0
+        while True:
+            frame_pdb = os.path.join(work_dir, f"trajectory{frame_num}.pdb")
+            if not os.path.exists(frame_pdb):
+                break
+            try:
+                os.remove(frame_pdb)
+            except:
+                pass
+            frame_num += 1
+        
+        # 거리만 따로 추출 (기존 호환성을 위해)
+        distances = [item[1] for item in structures_with_scores]
+        
+        # 결과 요약 로그
+        if top_structures:
+            log(f"Top 구조 선정 완료:")
+            log(f"  최고 조합 점수: {top_structures[0]['combined_score']:.4f}")
+            log(f"  최고 거리: {min([s['distance'] for s in top_structures]):.2f}Å")
+            log(f"  최고 RMSD: {min([s['rmsd'] for s in top_structures]):.2f}Å")
+        
+        return distances, top_structures
+        
+    except Exception as e:
+        log(f"궤적 분석 오류: {e}")
+        return [], []
+    
 def extract_distances_from_trajectory(tpr_file, xtc_file, binding_site_residues, work_dir):
     """궤적에서 거리 추출"""
     try:
@@ -1224,9 +1458,32 @@ def create_next_iteration_structure(work_dir, output_pdb, long_md=False):
         log(f"다음 iteration용 구조 생성 실패: {e}")
         return False
 
-# ===== 시뮬레이션 실행 함수들 =====
 
-def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, long_md=False):
+def print_top_structures_summary(top_structures):
+    """Top 구조들의 상세 정보 출력"""
+    if not top_structures:
+        log("저장된 Top 구조가 없습니다.")
+        return
+    
+    log(f"\n{'='*60}")
+    log("Top 구조 상세 정보")
+    log(f"{'='*60}")
+    log(f"{'순위':<4} {'Frame':<6} {'거리(Å)':<8} {'RMSD(Å)':<9} {'조합점수':<10} {'거리순위':<8} {'RMSD순위':<8}")
+    log("-" * 60)
+    
+    for struct in top_structures:
+        log(f"{struct['rank']:<4} {struct['frame']:<6} {struct['distance']:<8.2f} "
+            f"{struct['rmsd']:<9.2f} {struct['combined_score']:<10.4f} "
+            f"{struct.get('distance_rank', 'N/A'):<8} {struct.get('rmsd_rank', 'N/A'):<8}")
+    
+    log(f"\n통계 요약:")
+    log(f"  평균 거리: {np.mean([s['distance'] for s in top_structures]):.2f}Å")
+    log(f"  평균 RMSD: {np.mean([s['rmsd'] for s in top_structures]):.2f}Å")
+    log(f"  평균 조합점수: {np.mean([s['combined_score'] for s in top_structures]):.4f}")
+
+# ===== 시뮬레이션 실행 함수들 =====
+# run_attempt 함수 수정 부분
+def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, reference_pdb, long_md=False):
     """단일 attempt 실행"""
     log(f"Attempt {attempt_num} 시작 {'(긴 MD)' if long_md else ''}")
     
@@ -1257,7 +1514,21 @@ def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, long_md
     tpr_file = os.path.join(attempt_dir, "md.tpr")
     xtc_file = os.path.join(attempt_dir, "md.xtc")
     
-    distances = extract_distances_from_trajectory(tpr_file, xtc_file, binding_site_residues, attempt_dir)
+    # Long MD인 경우 RMSD도 고려한 Top 구조 저장, 일반 MD인 경우 기존 방식
+    if long_md:
+        # Reference 구조로 input.pdb 사용
+        distances, top_structures = extract_distances_and_top_structures_with_rmsd(
+            tpr_file, xtc_file, binding_site_residues, attempt_dir, reference_pdb, save_top_n=SAVE_TOP_N
+        )
+        log(f"Long MD Top 구조 {len(top_structures)}개 저장됨 (거리+RMSD 기준)")
+        
+        # Top 구조 상세 정보 출력
+        if top_structures:
+            print_top_structures_summary(top_structures)
+        
+    else:
+        distances = extract_distances_from_trajectory(tpr_file, xtc_file, binding_site_residues, attempt_dir)
+        top_structures = []
     
     if len(distances) < 2:
         log(f"Attempt {attempt_num} 실패: 거리 데이터 부족")
@@ -1267,7 +1538,8 @@ def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, long_md
             "stages": stages,
             "distances": distances,
             "reason": "insufficient_distance_data",
-            "long_md_executed": long_md
+            "long_md_executed": long_md,
+            "top_structures": top_structures
         }
     
     # 기울기 계산
@@ -1278,14 +1550,26 @@ def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, long_md
     log(f"Attempt {attempt_num} - 기울기: {slope:.6f}, 최소거리: {min_distance:.2f}Å, 채택: {accepted}")
     
     if accepted:
-        # 다음 iteration용 구조 생성
-        next_structure = os.path.join(work_dir, "next_structure.pdb")
-        structure_success = create_next_iteration_structure(attempt_dir, next_structure, long_md)
-        
-        if structure_success:
-            log(f"Attempt {attempt_num} 성공! 다음 iteration용 구조 생성 완료")
+        # 다음 iteration용 구조 생성 (Long MD가 아닌 경우만)
+        if not long_md:
+            next_structure = os.path.join(work_dir, "next_structure.pdb")
+            structure_success = create_next_iteration_structure(attempt_dir, next_structure, long_md)
+            
+            if structure_success:
+                log(f"Attempt {attempt_num} 성공! 다음 iteration용 구조 생성 완료")
+            else:
+                log(f"Attempt {attempt_num} 성공! 하지만 구조 생성 실패")
         else:
-            log(f"Attempt {attempt_num} 성공! 하지만 구조 생성 실패")
+            log(f"Long MD Attempt {attempt_num} 성공! Top {len(top_structures)}개 구조 저장됨")
+            
+            # Long MD 결과에 대한 추가 정보
+            if top_structures:
+                best_struct = top_structures[0]  # 조합 점수 기준 최고 구조
+                log(f"최고 구조 정보:")
+                log(f"  Frame: {best_struct['frame']}")
+                log(f"  거리: {best_struct['distance']:.2f}Å")
+                log(f"  RMSD: {best_struct['rmsd']:.2f}Å") 
+                log(f"  조합점수: {best_struct['combined_score']:.4f}")
     
     return {
         "attempt": attempt_num,
@@ -1297,15 +1581,16 @@ def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, long_md
         "final_distance": distances[-1],
         "min_distance": min_distance,
         "long_md_executed": long_md,
-        "close_contact_detected": min_distance <= CLOSE_DISTANCE_THRESHOLD
+        "close_contact_detected": min_distance <= CLOSE_DISTANCE_THRESHOLD,
+        "top_structures": top_structures
     }
 
-def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, long_md=False):
+def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, reference_pdb, long_md=False):
     """단일 iteration 실행 - binding_site_residues 매개변수 추가됨"""
     log(f"=== Iteration {iteration_num} 시작 {'(긴 MD)' if long_md else ''} ===")
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        result = run_attempt(work_dir, input_pdb, attempt, binding_site_residues, long_md)
+        result = run_attempt(work_dir, input_pdb, attempt, binding_site_residues, reference_pdb, long_md)
         
         # JSON에 attempt 결과 저장
         attempt_file = os.path.join(work_dir, f"iteration_{iteration_num}_attempt_{attempt}.json")
@@ -1314,14 +1599,23 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, lon
         
         if result["success"]:
             log(f"Iteration {iteration_num} 성공! (Attempt {attempt})")
-            return {
+            iteration_result = {
                 "iteration": iteration_num,
                 "success": True,
                 "attempts_used": attempt,
                 "final_result": result,
                 "long_md": long_md,
-                "close_contact_in_iteration": result.get("close_contact_detected", False)
+                "close_contact_in_iteration": result.get("close_contact_detected", False),
+                "final_with_top_structures": long_md  # Long MD인 경우 최종 종료
             }
+
+            if long_md:
+                log(f"Iteration {iteration_num} Long MD 완료! 시뮬레이션 최종 종료 (Attempt {attempt})")
+                log(f"Top {len(result['top_structures'])}개 구조가 최종 결과로 저장됨")
+            else:
+                log(f"Iteration {iteration_num} 성공! (Attempt {attempt})")
+            
+            return iteration_result
     
     log(f"Iteration {iteration_num} 실패: {MAX_ATTEMPTS}번 시도 모두 실패")
     return {
@@ -1330,10 +1624,11 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, lon
         "attempts_used": MAX_ATTEMPTS,
         "final_result": None,
         "long_md": long_md,
-        "close_contact_in_iteration": False
+        "close_contact_in_iteration": False,
+        "final_with_top_structures": False
     }
 
-def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu_queue, results_queue, process_id):
+def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu_queue, results_queue, process_id, reference_pdb=None):
     """GPU 할당된 단일 구조 시뮬레이션 실행"""
     structure_pdb, structure_name, output_dir = structure_info
     
@@ -1360,14 +1655,16 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
             "assigned_gpu": assigned_gpu,
             "process_id": process_id,
             "start_time": datetime.now().isoformat(),
-            "iterations": []
+            "iterations": [],
+            "final_top_structures": []  # 최종 Top 구조들
         }
         
         iteration = 0
         need_long_md = False
         first_dir = None
-        
-        while iteration < MAX_ITERATIONS:
+        simulation_completed = False  # 시뮬레이션 완료 플래그
+
+        while iteration < MAX_ITERATIONS and not simulation_completed:
             iteration += 1
             
             # iteration 디렉토리 생성
@@ -1380,7 +1677,7 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
                 first_dir = os.path.join(iter_dir, 'attempt_1')
             
             # iteration 실행
-            iteration_result = run_iteration(iter_dir, current_pdb, iteration, binding_site_residues, need_long_md)
+            iteration_result = run_iteration(iter_dir, current_pdb, iteration, binding_site_residues, reference_pdb, need_long_md)
             structure_results["iterations"].append(iteration_result)
             
             # iteration 결과 JSON 저장
@@ -1389,63 +1686,81 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
                 json.dump(iteration_result, f, indent=2, default=str)
             
             if iteration_result["success"]:
-                # 다음 iteration용 PDB 업데이트
-                next_structure = os.path.join(iter_dir, "next_structure.pdb")
-                if ENABLE_CHAIN_RESTORATION:
-                    success = restore_original_chain_ids(next_structure, next_structure, first_dir)
-                    if success:
-                        log(f"[Process {process_id}] 구조 {structure_name}: 다음 구조 저장 완료 (체인 복원됨)")
-                    else:
-                        log(f"[Process {process_id}] 구조 {structure_name}: 체인 복원 실패, 변환된 구조 사용")
-                
-                if os.path.exists(next_structure):
-                    current_pdb = next_structure
-                
-                # 근접 접촉 검사
-                if ENABLE_LONG_MD and iteration_result.get("close_contact_in_iteration", False):
-                    if not need_long_md:
-                        need_long_md = True
-                        log(f"[Process {process_id}] 구조 {structure_name}: 근접 접촉 감지! 긴 MD 예정")
-                        continue
-                    else:
-                        log(f"[Process {process_id}] 구조 {structure_name}: 긴 MD 완료, 시뮬레이션 종료")
-                        break
+                # Long MD 완료시 최종 종료
+                if iteration_result.get("final_with_top_structures", False):
+                    log(f"[Process {process_id}] 구조 {structure_name}: Long MD 완료로 시뮬레이션 최종 종료")
+                    
+                    # Top 구조들을 전체 결과에 저장
+                    if iteration_result["final_result"].get("top_structures"):
+                        structure_results["final_top_structures"] = iteration_result["final_result"]["top_structures"]
+                        
+                        # Top 구조들을 구조별 디렉토리로 복사
+                        for i, top_struct in enumerate(structure_results["final_top_structures"]):
+                            source_path = top_struct["path"]
+                            dest_name = f"final_top_{i+1}_{top_struct['filename']}"
+                            dest_path = os.path.join(struct_dir, dest_name)
+                            
+                            success = restore_original_chain_ids(source_path, source_path, first_dir)
+                            if success:
+                                log(f"[Process {process_id}] 구조 {structure_name} 최종 구조 {dest_name}: 저장 완료 (체인 복원됨)")
+                            else:
+                                log(f"[Process {process_id}] 구조 {structure_name} 최종 구조 {dest_name}: 체인 복원 실패, 변환된 구조 사용")
+
+                            try:
+                                shutil.copy(source_path, dest_path)
+                                # 경로 업데이트
+                                top_struct["final_path"] = dest_path
+                                log(f"[Process {process_id}] Top {i+1} 구조 복사: {dest_name}")
+                            except Exception as e:
+                                log(f"[Process {process_id}] Top 구조 복사 실패: {e}")
+                    
+                    simulation_completed = True
                 else:
-                    need_long_md = False
+                    # 일반 iteration 성공 - 다음 iteration용 PDB 업데이트
+                    next_structure = os.path.join(iter_dir, "next_structure.pdb")
+                    if ENABLE_CHAIN_RESTORATION:
+                        success = restore_original_chain_ids(next_structure, next_structure, first_dir)
+                        if success:
+                            log(f"[Process {process_id}] 구조 {structure_name}: 다음 구조 저장 완료 (체인 복원됨)")
+                        else:
+                            log(f"[Process {process_id}] 구조 {structure_name}: 체인 복원 실패, 변환된 구조 사용")
+                    
+                    if os.path.exists(next_structure):
+                        current_pdb = next_structure
+                    
+                    # 근접 접촉 검사
+                    if ENABLE_LONG_MD and iteration_result.get("close_contact_in_iteration", False):
+                        if not need_long_md:
+                            need_long_md = True
+                            log(f"[Process {process_id}] 구조 {structure_name}: 근접 접촉 감지! 긴 MD 예정")
+                    else:
+                        need_long_md = False
+                if iteration+1==MAX_ITERATIONS-1:
+                    need_long_md=True 
             else:
                 # iteration 실패 시 처음부터 다시 시작
                 log(f"[Process {process_id}] 구조 {structure_name}: Iteration {iteration} 실패 - 재시작")
                 current_pdb = structure_pdb
                 iteration = 0
                 need_long_md = False
-                continue
         
         # 구조 시뮬레이션 완료
         structure_results["end_time"] = datetime.now().isoformat()
         structure_results["total_iterations"] = len(structure_results["iterations"])
         structure_results["successful_iterations"] = len([r for r in structure_results["iterations"] if r["success"]])
         structure_results["long_md_executed"] = any(r.get("long_md", False) for r in structure_results["iterations"])
-        
-        # 최종 구조 저장
-        if structure_results["iterations"] and structure_results["iterations"][-1]["success"]:
-            final_iter_dir = os.path.join(struct_dir, f'iteration_{len(structure_results["iterations"])}')
-            final_structure = os.path.join(final_iter_dir, "next_structure.pdb")
-            final_output = os.path.join(struct_dir, "final_structure.pdb")
-            
-            if os.path.exists(final_structure):
-                success = restore_original_chain_ids(final_structure, final_output, first_dir)
-                if success:
-                    log(f"[Process {process_id}] 구조 {structure_name}: 최종 구조 저장 완료 (체인 복원됨)")
-                else:
-                    log(f"[Process {process_id}] 구조 {structure_name}: 최종 구조 체인 복원 실패")
-                    shutil.copy(final_structure, final_output)
+        structure_results["simulation_completed"] = simulation_completed
         
         # 구조별 결과 저장
         structure_result_file = os.path.join(struct_dir, "structure_results.json")
         with open(structure_result_file, "w") as f:
             json.dump(structure_results, f, indent=2, default=str)
         
-        log(f"[Process {process_id}] 구조 {structure_name} (GPU {assigned_gpu}) 완료: {structure_results['successful_iterations']}/{structure_results['total_iterations']} 성공")
+        completion_msg = "Long MD로 완료" if simulation_completed else f"{structure_results['successful_iterations']}/{structure_results['total_iterations']} 성공"
+        log(f"[Process {process_id}] 구조 {structure_name} (GPU {assigned_gpu}) 완료: {completion_msg}")
+        
+        if structure_results["final_top_structures"]:
+            log(f"[Process {process_id}] 최종 Top 구조 {len(structure_results['final_top_structures'])}개 저장됨")
         
         # 결과를 큐에 넣기
         results_queue.put(structure_results)
@@ -1466,6 +1781,7 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
             "iterations": [],
             "total_iterations": 0,
             "successful_iterations": 0,
+            "final_top_structures": [],
             "error": str(e)
         }
         results_queue.put(error_result)
@@ -1475,7 +1791,7 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
         gpu_queue.put(assigned_gpu)
         log(f"[Process {process_id}] GPU {assigned_gpu} 반납됨")
 
-def run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residues):
+def run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residues, reference_pdb=None):
     """GPU 병렬 시뮬레이션 실행"""
     log("=== GPU 병렬 시뮬레이션 시작 ===")
     
@@ -1541,7 +1857,7 @@ def run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residue
         # 새 프로세스 시작
         process = Process(
             target=run_structure_simulation_with_gpu,
-            args=(info, binding_site_residues, gpu_queue, results_queue, i)
+            args=(info, binding_site_residues, gpu_queue, results_queue, i, reference_pdb)
         )
         process.start()
         processes.append(process)
@@ -1627,7 +1943,13 @@ def main():
         "receptor_chain": receptor_chain,
         "binding_site_residues": binding_site_residues,
         "total_structures": len(structure_pool),
-        "structure_results": []
+        "structure_results": [],
+        "final_top_structures_summary": {
+            "total_structures_with_tops": 0,
+            "best_overall_distance": float('inf'),
+            "best_overall_structure": None,
+            "all_top_structures": []
+        }
     }
     
     # 시뮬레이션 설정 정보 로깅
@@ -1642,18 +1964,7 @@ def main():
     
     # GPU 병렬 시뮬레이션 실행
     log("=== GPU 병렬 시뮬레이션 시작 ===")
-
-    # 구조 정보 리스트 준비
-    structure_infos = []
-    for i, structure_pdb in enumerate(structure_pool):
-        structure_name = f"struct_{i:02d}"
-        structure_infos.append((structure_pdb, structure_name, output_dir))
-    
-    # 병렬 실행
-    all_structure_results = []
-    completed_count = 0
-    
-    all_structure_results = run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residues)
+    all_structure_results = run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residues, target_pdb)
     all_structure_results.sort(key=lambda x: x['structure_name'])
     all_results["structure_results"] = all_structure_results
     
@@ -1664,38 +1975,150 @@ def main():
     all_results["total_successful_structures"] = len([r for r in all_results["structure_results"] 
                                                      if r["successful_iterations"] > 0])
     
-    # 최고 성능 구조 식별
-    best_structure = None
-    max_success = 0
-    for result in all_results["structure_results"]:
-        if result["successful_iterations"] > max_success:
-            max_success = result["successful_iterations"]
-            best_structure = result["structure_name"]
+    # Top 구조 정보 수집 및 분석 (개선됨)
+    log("=== Top 구조 정보 수집 및 분석 ===")
+    all_top_structures = []
+    structures_with_tops = 0
+    best_combined_score = float('inf')
+    best_distance = float('inf')
+    best_rmsd = float('inf')
+    best_structure_info = None
     
-    if best_structure:
-        all_results["best_structure"] = best_structure
-        all_results["max_successful_iterations"] = max_success
+    for struct_result in all_results["structure_results"]:
+        if struct_result.get("final_top_structures"):
+            structures_with_tops += 1
+            structure_name = struct_result["structure_name"]
+            
+            for top_struct in struct_result["final_top_structures"]:
+                # 구조 정보에 추가 메타데이터 포함
+                enhanced_top = {
+                    **top_struct,
+                    "source_structure": structure_name,
+                    "source_iterations": struct_result.get("successful_iterations", 0)
+                }
+                all_top_structures.append(enhanced_top)
+                
+                # 전체 최고 조합 점수 구조 찾기
+                combined_score = top_struct.get('combined_score', float('inf'))
+                if combined_score < best_combined_score:
+                    best_combined_score = combined_score
+                    best_structure_info = {
+                        "structure_name": structure_name,
+                        "top_info": enhanced_top,
+                        "structure_dir": os.path.join(output_dir, f"structure_{structure_name}"),
+                        "selection_criteria": "combined_score"
+                    }
+                
+                # 개별 기준 최고값들도 추적
+                if top_struct["distance"] < best_distance:
+                    best_distance = top_struct["distance"]
+                if top_struct.get("rmsd", float('inf')) < best_rmsd:
+                    best_rmsd = top_struct.get("rmsd", float('inf'))
+    
+    # Top 구조 요약 정보 업데이트 (개선됨)
+    all_results["final_top_structures_summary"] = {
+        "total_structures_with_tops": structures_with_tops,
+        "best_overall_combined_score": best_combined_score if best_combined_score != float('inf') else None,
+        "best_overall_distance": best_distance if best_distance != float('inf') else None,
+        "best_overall_rmsd": best_rmsd if best_rmsd != float('inf') else None,
+        "best_overall_structure": best_structure_info,
+        "total_top_structures": len(all_top_structures),
+        "scoring_method": "distance_rmsd_combined",
+        "top_structures_by_combined_score": sorted(all_top_structures, key=lambda x: x.get('combined_score', float('inf')))[:10],
+        "top_structures_by_distance": sorted(all_top_structures, key=lambda x: x['distance'])[:5],
+        "top_structures_by_rmsd": sorted([s for s in all_top_structures if 'rmsd' in s], key=lambda x: x['rmsd'])[:5]
+    }
+    
+    # 최고 성능 구조 및 Top 구조 처리 (개선됨)
+    if best_structure_info:
+        log(f"전체 최고 구조 발견: {best_structure_info['structure_name']}")
+        log(f"선정 기준: 조합점수 (거리+RMSD)")
+        log(f"조합점수: {best_combined_score:.4f}")
+        log(f"거리: {best_structure_info['top_info']['distance']:.2f}Å")
+        if 'rmsd' in best_structure_info['top_info']:
+            log(f"RMSD: {best_structure_info['top_info']['rmsd']:.2f}Å")
+        log(f"Frame: {best_structure_info['top_info']['frame']}")
         
-        # 최고 성능 구조의 최종 결과를 전체 결과로 복사
-        best_struct_dir = os.path.join(output_dir, f"structure_{best_structure}")
-        best_final_structure = os.path.join(best_struct_dir, "final_structure.pdb")
-        if os.path.exists(best_final_structure):
-            overall_final = os.path.join(output_dir, "accepted_result.pdb")
-            shutil.copy(best_final_structure, overall_final)
-            log(f"최고 성능 구조의 최종 결과 복사: {overall_final}")
+        # 전체 최고 구조를 메인 디렉토리에 복사
+        best_top_source = best_structure_info['top_info'].get('final_path')
+        if not best_top_source or not os.path.exists(best_top_source):
+            best_top_source = best_structure_info['top_info'].get('path')
+        
+        if best_top_source and os.path.exists(best_top_source):
+            best_final_path = os.path.join(output_dir, "best_overall_structure.pdb")
+            shutil.copy(best_top_source, best_final_path)
+            log(f"전체 최고 구조 복사: {best_final_path}")
+        
+        # 다양한 기준별 상위 구조들을 메인 디렉토리에 복사
+        log("다양한 기준별 Top 구조 복사 중...")
+        
+        # 조합점수 기준 상위 5개
+        top_combined = all_results["final_top_structures_summary"]["top_structures_by_combined_score"][:5]
+        for i, top_struct in enumerate(top_combined):
+            source_path = top_struct.get('final_path') or top_struct.get('path')
+            if source_path and os.path.exists(source_path):
+                combined_score = top_struct.get('combined_score', 0)
+                dest_name = f"top_combined_{i+1}_{top_struct['source_structure']}_frame_{top_struct['frame']}_score_{combined_score:.4f}.pdb"
+                dest_path = os.path.join(output_dir, dest_name)
+                
+                try:
+                    shutil.copy(source_path, dest_path)
+                    log(f"조합점수 Top {i+1}: {dest_name} (점수: {combined_score:.4f})")
+                except Exception as e:
+                    log(f"조합점수 Top {i+1} 복사 실패: {e}")
+        
+        # 거리 기준 상위 3개
+        top_distance = all_results["final_top_structures_summary"]["top_structures_by_distance"][:3]
+        for i, top_struct in enumerate(top_distance):
+            source_path = top_struct.get('final_path') or top_struct.get('path')
+            if source_path and os.path.exists(source_path):
+                dest_name = f"top_distance_{i+1}_{top_struct['source_structure']}_frame_{top_struct['frame']}_dist_{top_struct['distance']:.2f}A.pdb"
+                dest_path = os.path.join(output_dir, dest_name)
+                
+                try:
+                    shutil.copy(source_path, dest_path)
+                    log(f"거리 Top {i+1}: {dest_name} ({top_struct['distance']:.2f}Å)")
+                except Exception as e:
+                    log(f"거리 Top {i+1} 복사 실패: {e}")
+        
+        # RMSD 기준 상위 3개 (RMSD가 있는 구조만)
+        top_rmsd = all_results["final_top_structures_summary"]["top_structures_by_rmsd"][:3]
+        for i, top_struct in enumerate(top_rmsd):
+            source_path = top_struct.get('final_path') or top_struct.get('path')
+            if source_path and os.path.exists(source_path):
+                dest_name = f"top_rmsd_{i+1}_{top_struct['source_structure']}_frame_{top_struct['frame']}_rmsd_{top_struct['rmsd']:.2f}A.pdb"
+                dest_path = os.path.join(output_dir, dest_name)
+                
+                try:
+                    shutil.copy(source_path, dest_path)
+                    log(f"RMSD Top {i+1}: {dest_name} ({top_struct['rmsd']:.2f}Å)")
+                except Exception as e:
+                    log(f"RMSD Top {i+1} 복사 실패: {e}")
     
-    # 최종 결과 저장
-    final_result_file = os.path.join(output_dir, "final_results.json")
-    with open(final_result_file, "w") as f:
-        json.dump(all_results, f, indent=2, default=str)
-    
+    # 최종 결과 로그 (개선됨)
     log("=== Simple SuMD 완료 ===")
     log(f"처리된 구조 수: {len(structure_pool)}")
     log(f"성공한 구조 수: {all_results['total_successful_structures']}")
     log(f"전체 성공률: {all_results['total_successful_structures']}/{len(structure_pool)}")
-    if best_structure:
-        log(f"최고 성능 구조: {best_structure} ({max_success}회 성공)")
+    
+    # Top 구조 결과 요약 (개선됨)
+    if all_results["final_top_structures_summary"]["total_structures_with_tops"] > 0:
+        log(f"Top 구조 보유 구조 수: {all_results['final_top_structures_summary']['total_structures_with_tops']}")
+        log(f"총 Top 구조 수: {all_results['final_top_structures_summary']['total_top_structures']}")
+        
+        if all_results["final_top_structures_summary"]["best_overall_combined_score"]:
+            log(f"전체 최고 조합점수: {all_results['final_top_structures_summary']['best_overall_combined_score']:.4f}")
+        if all_results["final_top_structures_summary"]["best_overall_distance"]:
+            log(f"전체 최고 거리: {all_results['final_top_structures_summary']['best_overall_distance']:.2f}Å")
+        if all_results["final_top_structures_summary"]["best_overall_rmsd"]:
+            log(f"전체 최고 RMSD: {all_results['final_top_structures_summary']['best_overall_rmsd']:.2f}Å")
+    
     log(f"최종 결과: {final_result_file}")
+    log("주요 결과 파일:")
+    log(f"  - best_overall_structure.pdb (전체 최고 조합점수 구조)")
+    log(f"  - top_combined_*.pdb (조합점수 기준 상위 구조들)")
+    log(f"  - top_distance_*.pdb (거리 기준 상위 구조들)")
+    log(f"  - top_rmsd_*.pdb (RMSD 기준 상위 구조들)")
 
 if __name__ == "__main__":
     main()
