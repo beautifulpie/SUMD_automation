@@ -495,12 +495,16 @@ def define_binding_site(input_pdb, ligand_chain, receptor_chain, distance_cutoff
             for chain in model:
                 if chain.id == ligand_chain:
                     ligand_atoms = [atom for atom in chain.get_atoms()]
-                elif chain.id == receptor_chain:
+        
+        for model in structure:
+            for chain in model:
+                if chain.id == receptor_chain:
                     for residue in chain:
                         for atom in residue:
                             # ligand의 모든 원자와 거리 계산
                             for lig_atom in ligand_atoms:
                                 distance = np.linalg.norm(atom.coord - lig_atom.coord)
+                                # log(f"{lig_atom.coord}, {atom.coord}, {distance}")
                                 if distance < distance_cutoff:
                                     residue_id = residue.get_id()
                                     full_id = f"{residue_id[1]}{residue_id[2].strip()}"
@@ -1607,7 +1611,7 @@ def main():
         log("Ligand/Receptor 식별 실패")
         sys.exit(1)
     
-    binding_site_residues = define_binding_site(target_pdb, ligand_chain, receptor_chain)
+    binding_site_residues = define_binding_site(target_pdb, ligand_chain, receptor_chain, distance_cutoff=BINDING_SITE_CUTOFF)
     if binding_site_residues is None:
         log("Binding site 정의 실패")
         sys.exit(1)
