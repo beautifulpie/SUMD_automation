@@ -852,7 +852,7 @@ pbc = xyz
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
-def get_chains_by_size(structure):
+def get_chains_by_size(structure, sel="lig"):
     """구조의 chain들을 크기 순으로 정렬하여 반환"""
     chain_info = []
     for model in structure:
@@ -862,9 +862,15 @@ def get_chains_by_size(structure):
     
     # 크기 순 정렬 (작은 것부터)
     chain_info.sort(key=lambda x: x[1])
-    return chain_info[:1]
+    
+    if sel=="lig":
+        return chain_info[:1]
+    elif sel=="rec":
+        return chain_info[1:]
+    else
+        return chain_info
 
-def calculate_rmsd_between_structures(pdb1, pdb2):
+def calculate_rmsd_between_structures(pdb1, pdb2, sel="lig"):
     """두 PDB 구조 간의 RMSD 계산 (단백질만)"""
     try:
         from Bio.PDB import PDBParser, Superimposer
@@ -875,8 +881,8 @@ def calculate_rmsd_between_structures(pdb1, pdb2):
         structure2 = parser.get_structure("struct2", pdb2)
 
         # Chain ID를 기준으로 매칭 (순서 무관)
-        chains1_info = get_chains_by_size(structure1)  # [(H, 100, chainH), (L, 300, chainL)]
-        chains2_info = get_chains_by_size(structure2)  # [(A, 100, chainA), (B, 300, chainB)]
+        chains1_info = get_chains_by_size(structure1, sel)  # [(H, 100, chainH), (L, 300, chainL)]
+        chains2_info = get_chains_by_size(structure2, sel)  # [(A, 100, chainA), (B, 300, chainB)]
 
         if len(chains1_info) != len(chains2_info):
             log(f"Chain 개수 불일치: {len(chains1_info)} vs {len(chains2_info)}")
