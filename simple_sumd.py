@@ -161,9 +161,9 @@ def generate_multi_direction_vectors(base_vector):
     """원뿔형 벡터 생성 - ROTATION_STEP 설정에 따라 분할 각도 조절"""
     vectors = []
     
-    # 1. 기준 벡터 (역방향 30Å)
-    vectors.append(-base_vector)  # 반대 방향
-    log("기준 역방향 벡터 추가")
+    # 1. 기준 벡터 (방향 30Å)
+    vectors.append(base_vector)
+    # log(f"기준 방향 벡터 추가 {base_vector}")
     
     # 2. 기준 벡터에 수직인 두 벡터 찾기 (원뿔의 기저 평면용)
     if abs(base_vector[2]) < 0.9:  # Z 성분이 작으면
@@ -199,7 +199,7 @@ def generate_multi_direction_vectors(base_vector):
             
             # 원뿔 표면의 점 계산: 기준벡터에서 60도 기울어진 방향
             # 원뿔 축(기준벡터) 성분과 반지름 성분 조합
-            cone_vector = (-base_vector * math.cos(cone_angle_rad) + 
+            cone_vector = (base_vector * math.cos(cone_angle_rad) + 
                         direction_in_plane * math.sin(cone_angle_rad))
             cone_vector = cone_vector / np.linalg.norm(cone_vector)
             
@@ -241,7 +241,7 @@ def apply_structure_separation(input_pdb, output_pdb, separation_vector, distanc
     except Exception as e:
         log(f"구조 이격 적용 실패: {e}")
         return False
-
+    
 def create_rotation_matrix(axis, angle_degrees):
     """축 기준 회전 행렬 생성 (Rodrigues' rotation formula)"""
     angle = math.radians(angle_degrees)
