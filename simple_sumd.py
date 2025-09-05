@@ -60,15 +60,15 @@ def parse_gpu_ids(gpu_id_string):
         log(f"GPU ID 파싱 실패: {e}")
         return ["0"]  # 기본값
 
-def save_original_chain_info(input_pdb, chain1, chain2):
-    """원본 체인 정보 저장 - 딕셔너리 반환"""
-    try:
-        original_chains = {chain1: chain1, chain2: chain2}
-        log(f"원본 체인 정보 저장: {original_chains}")
-        return original_chains
-    except Exception as e:
-        log(f"원본 체인 정보 저장 실패: {e}")
-        return None
+# def save_original_chain_info(input_pdb, chain1, chain2):
+#     """원본 체인 정보 저장 - 딕셔너리 반환"""
+#     try:
+#         original_chains = {chain1: chain1, chain2: chain2}
+#         log(f"원본 체인 정보 저장: {original_chains}")
+#         return original_chains
+#     except Exception as e:
+#         log(f"원본 체인 정보 저장 실패: {e}")
+#         return None
 
 def extract_target_chains_pdb(input_pdb, output_pdb, chain1, chain2):
     """타겟 체인만 추출하여 새로운 PDB 생성"""
@@ -1022,6 +1022,25 @@ pbc = xyz
 
 # ===== 체인 복원 함수들 =====
 
+def get_original_chain_order(input_pdb):
+    """원본 PDB 파일에서 체인 순서 추출"""
+    try:
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure("structure", input_pdb)
+        
+        chain_order = []
+        for model in structure:
+            for chain in model:
+                if chain.id not in chain_order:
+                    chain_order.append(chain.id)
+        
+        log(f"원본 체인 순서: {chain_order}")
+        return chain_order
+        
+    except Exception as e:
+        log(f"원본 체인 순서 추출 실패: {e}")
+        return []
+
 def extract_chain_id_from_filename(filename):
     """파일명에서 체인 ID 추출"""
     import re
@@ -1059,8 +1078,8 @@ def count_atoms_in_topology(topology_file):
         log(f"토폴로지 파일 읽기 실패 {topology_file}: {e}")
         return 0
 
-def assign_chains_by_atom_ranges(input_pdb, output_pdb, chain_atom_counts):
-    """원자 범위 기반 체인 할당 - 원래 로직 구현"""
+def assign_chains_by_atom_ranges(input_pdb, output_pdb, chain_atom_counts, original_chain_order):
+    """원자 범위 기반 체인 할당 - 원본 체인 순서 유지"""
     try:
         parser = PDBParser(QUIET=True)
         structure = parser.get_structure("structure", input_pdb)
@@ -1068,8 +1087,17 @@ def assign_chains_by_atom_ranges(input_pdb, output_pdb, chain_atom_counts):
             log(f"PDB 구조가 None: {input_pdb}")
             raise
         
-        # 체인을 알파벳 순으로 정렬된 순서로 처리
-        sorted_chains = sorted(chain_atom_counts.keys())
+        
+        # 원본 순서에 있는 체인들만 필터링
+        sorted_chains = [chain_id for chain_id in original_chain_order 
+                        if chain_id in chain_atom_counts]
+        # 혹시 빠진 체인이 있으면 추가
+        missing_chains = [chain_id for chain_id in chain_atom_counts.keys() 
+                        if chain_id not in sorted_chains]
+        sorted_chains.extend(sorted(missing_chains))
+    
+        
+        log(f"사용할 체인 순서: {sorted_chains}")
         
         # 각 체인의 시작/끝 원자 인덱스 계산
         chain_ranges = {}
@@ -1114,13 +1142,13 @@ def assign_chains_by_atom_ranges(input_pdb, output_pdb, chain_atom_counts):
         log(f"체인 할당 실패: {e}")
         return False
 
-def restore_chain_info_from_topology(work_dir, converted_pdb, output_pdb):
-    """토폴로지 파일 기반 체인 정보 복원 (검증된 방법)"""
+def restore_chain_info_from_topology(work_dir, converted_pdb, output_pdb, original_chain_order):
+    """토폴로지 파일 기반 체인 정보 복원 (원본 순서 유지)"""
     try:
         log("=== 토폴로지 기반 체인 정보 복원 시작 ===")
         
-        # 1. 토폴로지 파일들을 알파벳 순으로 스캔
-        topology_files = sorted(glob.glob(os.path.join(work_dir, "topol_Protein_chain_*.itp")))
+        # 1. 토폴로지 파일들 스캔 (정렬하지 않음)
+        topology_files = glob.glob(os.path.join(work_dir, "topol_Protein_chain_*.itp"))
         
         if not topology_files:
             log("체인별 토폴로지 파일을 찾을 수 없음 - 원본 파일 복사")
@@ -1149,8 +1177,8 @@ def restore_chain_info_from_topology(work_dir, converted_pdb, output_pdb):
         
         log(f"이 {len(chain_atom_counts)}개 체인, {total_atoms} 원자")
         
-        # 3. PDB 파일에서 체인 할당
-        success = assign_chains_by_atom_ranges(converted_pdb, output_pdb, chain_atom_counts)
+        # 3. PDB 파일에서 체인 할당 (원본 순서 유지)
+        success = assign_chains_by_atom_ranges(converted_pdb, output_pdb, chain_atom_counts, original_chain_order)
         
         if success:
             log("토폴로지 기반 체인 정보 복원 완료")
@@ -1169,11 +1197,16 @@ def restore_chain_info_from_topology(work_dir, converted_pdb, output_pdb):
         return False
 
 def restore_original_chain_ids(gromacs_pdb, output_pdb, work_dir):
-    """토폴로지 기반 체인 복원 (개선된 방식)"""
+    """토폴로지 기반 체인 복원 (원본 순서 유지)"""
     
     try:
+        # 원본 체인 순서 추출
+        original_chain_order = None
+        original_pdb=os.path.join(work_dir, "input.pdb")
+        original_chain_order = get_original_chain_order(original_pdb)
+        
         # 토폴로지 파일 기반 복원 시도
-        success = restore_chain_info_from_topology(work_dir, gromacs_pdb, output_pdb)
+        success = restore_chain_info_from_topology(work_dir, gromacs_pdb, output_pdb, original_chain_order)
         
         if success:
             log("토폴로지 기반 체인 복원 성공")
@@ -1594,10 +1627,10 @@ def main():
     log(f"회전 변형: {'활성화' if ENABLE_ROTATIONAL_VARIANTS else '비활성화'}")
     
     # 원본 chain 정보 저장
-    original_chains = save_original_chain_info(input_pdb, chain1, chain2)
-    if original_chains is None:
-        log("원본 chain 정보 저장 실패")
-        sys.exit(1)
+    # original_chains = save_original_chain_info(input_pdb, chain1, chain2)
+    # if original_chains is None:
+    #     log("원본 chain 정보 저장 실패")
+    #     sys.exit(1)
     
     # 타겟 체인만 추출
     target_pdb = os.path.join(output_dir, "target_chains.pdb")
@@ -1655,7 +1688,7 @@ def main():
     
     # 병렬 실행
     all_structure_results = []
-    completed_count = 0
+    # completed_count = 0
     
     all_structure_results = run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residues)
     all_structure_results.sort(key=lambda x: x['structure_name'])
