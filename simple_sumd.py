@@ -136,13 +136,18 @@ def calculate_separation_axis(pdb_file, chain1, chain2):
                             chain_centers[chain.id] = center
         
         if len(chain_centers) == 2:
-            centers = list(chain_centers.values())
-            # 체인 간 벡터 (chain2에서 chain1 방향)
-            separation_vector = centers[1] - centers[0]
-            # 정규화
+            # 순서를 명시적으로 지정
+            receptor_center = chain_centers[chain1]  # receptor
+            ligand_center = chain_centers[chain2]    # ligand
+            
+            # receptor에서 ligand로 향하는 벡터 (멀어지는 방향)
+            separation_vector = ligand_center - receptor_center
             separation_vector = separation_vector / np.linalg.norm(separation_vector)
             
-            log(f"분리 축 계산 완료: {separation_vector}")
+            log(f"Receptor center: {receptor_center}")
+            log(f"Ligand center: {ligand_center}")
+            log(f"분리 방향 (receptor→ligand): {separation_vector}")
+            
             return separation_vector, chain_centers
         
         log("체인 중심 계산 실패")
@@ -385,6 +390,25 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
         if os.path.exists(pool_dir):
             shutil.rmtree(pool_dir)
         os.makedirs(pool_dir)
+
+        # 더 작은 체인을 이동시키기 위해 체인 크기 비교
+        chain_sizes = {}
+        try:
+            parser = PDBParser(QUIET=True)
+            structure = parser.get_structure("structure", input_pdb)
+            for model in structure:
+                for chain in model:
+                    if chain.id in [chain1, chain2]:
+                        atom_count = sum(1 for residue in chain for atom in residue)
+                        chain_sizes[chain.id] = atom_count
+        except:
+            chain_sizes = {chain1: 1000, chain2: 1000}  # 기본값
+
+        # 더 작은 체인 결정
+        chain_to_move = chain1 if chain_sizes.get(chain1, 0) <= chain_sizes.get(chain2, 0) else chain2
+        log(f"이동할 체인: {chain_to_move} (크기: {chain_sizes.get(chain_to_move, 0)} 원자)")
+        chain_to_stay = chain1 if chain_sizes.get(chain1, 0) > chain_sizes.get(chain2, 0) else chain2
+        log(f"이동할 체인: {chain_to_stay} (크기: {chain_sizes.get(chain_to_stay, 0)} 원자)")
         
         # 1단계: 분리 축 계산
         separation_vector, chain_centers = calculate_separation_axis(input_pdb, chain1, chain2)
@@ -398,24 +422,6 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
         
         # 3단계: 각 방향으로 이격된 구조 생성
         base_structures = []
-        
-        # 더 작은 체인을 이동시키기 위해 체인 크기 비교
-        chain_sizes = {}
-        try:
-            parser = PDBParser(QUIET=True)
-            structure = parser.get_structure("structure", input_pdb)
-            for model in structure:
-                for chain in model:
-                    if chain.id in [chain1, chain2]:
-                        atom_count = sum(1 for residue in chain for atom in residue)
-                        chain_sizes[chain.id] = atom_count
-        except:
-            chain_sizes = {chain1: 1000, chain2: 1000}  # 기본값
-        
-        # 더 작은 체인 결정
-        chain_to_move = chain1 if chain_sizes.get(chain1, 0) <= chain_sizes.get(chain2, 0) else chain2
-        log(f"이동할 체인: {chain_to_move} (크기: {chain_sizes.get(chain_to_move, 0)} 원자)")
-        
         for i, direction in enumerate(direction_vectors):
             separated_pdb = os.path.join(pool_dir, f"separated_{i}.pdb")
             
