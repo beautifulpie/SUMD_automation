@@ -867,7 +867,7 @@ def get_chains_by_size(structure, sel="lig"):
         return chain_info[:1]
     elif sel=="rec":
         return chain_info[1:]
-    else
+    else:
         return chain_info
 
 def calculate_rmsd_between_structures(pdb1, pdb2, sel="lig"):
