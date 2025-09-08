@@ -1620,6 +1620,7 @@ def main():
     chain2 = sys.argv[3]
     output_dir = sys.argv[4] if len(sys.argv) > 4 else "sumd_output"
     
+    output_dir=os.path.abspath(output_dir)
     # 출력 디렉토리 준비
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
