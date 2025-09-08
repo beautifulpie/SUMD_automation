@@ -60,16 +60,6 @@ def parse_gpu_ids(gpu_id_string):
         log(f"GPU ID 파싱 실패: {e}")
         return ["0"]  # 기본값
 
-# def save_original_chain_info(input_pdb, chain1, chain2):
-#     """원본 체인 정보 저장 - 딕셔너리 반환"""
-#     try:
-#         original_chains = {chain1: chain1, chain2: chain2}
-#         log(f"원본 체인 정보 저장: {original_chains}")
-#         return original_chains
-#     except Exception as e:
-#         log(f"원본 체인 정보 저장 실패: {e}")
-#         return None
-
 def extract_target_chains_pdb(input_pdb, output_pdb, chain1, chain2):
     """타겟 체인만 추출하여 새로운 PDB 생성"""
     try:
@@ -525,6 +515,126 @@ def define_binding_site(input_pdb, ligand_chain, receptor_chain, distance_cutoff
     except Exception as e:
         log(f"Binding site 정의 실패: {e}")
         return None
+    
+
+def parse_pdb_filename(pdb_file_path):
+    """PDB 파일명에서 정보 추출"""
+    filename = os.path.basename(pdb_file_path)
+    filename = filename.replace('.pdb', '')
+    
+    # _processed 제거
+    if filename.endswith('_processed'):
+        filename = filename[:-10]
+    
+    # 언더스코어로 분할
+    parts = filename.split('_')
+    
+    if len(parts) != 3:
+        raise ValueError(f"잘못된 파일명 형식: {filename} (예상 형식: pdb_receptor_ligand)")
+    
+    pdb_code, receptor_chain, ligand_chain = parts
+    return pdb_code, receptor_chain, ligand_chain
+
+def find_pdb_files(input_path):
+    """입력 경로에서 PDB 파일들 찾기"""
+    if os.path.isfile(input_path):
+        # 단일 파일인 경우
+        return [input_path]
+    elif os.path.isdir(input_path):
+        # 디렉토리인 경우
+        pdb_files = []
+        for ext in ['*.pdb', '*_processed.pdb']:
+            pdb_files.extend(glob.glob(os.path.join(input_path, ext)))
+        
+        if not pdb_files:
+            raise FileNotFoundError(f"PDB 파일을 찾을 수 없습니다: {input_path}")
+        
+        return sorted(pdb_files)
+    else:
+        raise FileNotFoundError(f"입력 경로가 존재하지 않습니다: {input_path}")
+
+def create_structure_pools_for_all_pdbs(input_path, base_output_dir):
+    """모든 PDB 파일에 대해 구조 풀 생성"""
+    log("=== 모든 PDB 파일의 구조 풀 생성 시작 ===")
+    
+    pdb_files = find_pdb_files(input_path)
+    log(f"발견된 PDB 파일: {len(pdb_files)}개")
+    
+    all_structure_info = []
+    
+    for pdb_file in pdb_files:
+        try:
+            log(f"PDB 파일 처리 중: {os.path.basename(pdb_file)}")
+            
+            # 파일명에서 체인 정보 추출 시도
+            try:
+                pdb_code, chain1, chain2 = parse_pdb_filename(pdb_file)
+                log(f"  파일명에서 추출된 정보: {pdb_code}, {chain1}, {chain2}")
+            except ValueError as e:
+                log(f"  파일명 파싱 실패: {e}")
+                log(f"  자동 체인 감지 시도...")
+                
+                # 자동 체인 감지
+                ligand_chain, receptor_chain = identify_ligand_receptor(pdb_file)
+                if ligand_chain is None or receptor_chain is None:
+                    log(f"  자동 체인 감지 실패, 건너뛰기")
+                    continue
+                
+                pdb_code = os.path.basename(pdb_file).replace('.pdb', '').replace('_processed', '')
+                chain1, chain2 = receptor_chain, ligand_chain
+            
+            # 개별 PDB 출력 디렉토리 생성
+            pdb_output_dir = os.path.join(base_output_dir, f"{pdb_code}_{chain1}_{chain2}")
+            if os.path.exists(pdb_output_dir):
+                shutil.rmtree(pdb_output_dir)
+            os.makedirs(pdb_output_dir)
+            
+            # 타겟 체인만 추출
+            target_pdb = os.path.join(pdb_output_dir, "target_chains.pdb")
+            if not extract_target_chains_pdb(pdb_file, target_pdb, chain1, chain2):
+                log(f"  타겟 체인 추출 실패, 건너뛰기")
+                continue
+            
+            # Ligand/Receptor 식별 및 Binding site 정의
+            ligand_chain, receptor_chain = identify_ligand_receptor(target_pdb)
+            if ligand_chain is None or receptor_chain is None:
+                log(f"  Ligand/Receptor 식별 실패, 건너뛰기")
+                continue
+            
+            binding_site_residues = define_binding_site(target_pdb, ligand_chain, receptor_chain, distance_cutoff=BINDING_SITE_CUTOFF)
+            if binding_site_residues is None:
+                log(f"  Binding site 정의 실패, 건너뛰기")
+                continue
+            
+            # 구조 풀 생성
+            structure_pool = create_initial_structure_pool(target_pdb, chain1, chain2, pdb_output_dir)
+            
+            # 구조 정보 저장
+            pdb_info = {
+                "pdb_code": pdb_code,
+                "original_file": pdb_file,
+                "chain1": chain1,
+                "chain2": chain2,
+                "ligand_chain": ligand_chain,
+                "receptor_chain": receptor_chain,
+                "binding_site_residues": binding_site_residues,
+                "structure_pool": structure_pool,
+                "output_dir": pdb_output_dir,
+                "target_pdb": target_pdb
+            }
+            
+            all_structure_info.append(pdb_info)
+            
+            log(f"  구조 풀 생성 완료: {len(structure_pool)}개 구조")
+            
+        except Exception as e:
+            log(f"  PDB 파일 처리 중 오류: {e}")
+            continue
+    
+    log(f"=== 구조 풀 생성 완료: {len(all_structure_info)}개 PDB, 총 {sum(len(info['structure_pool']) for info in all_structure_info)}개 구조 ===")
+    
+    return all_structure_info
+
 
 def calculate_mass_weighted_center(atoms_coords, atom_types):
     """질량 가중 중심 계산"""
@@ -1406,15 +1516,15 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, lon
         "failure_type": "max_attempts_exceeded"
     }
 
-def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu_queue, results_queue, process_id):
-    """GPU 할당된 단일 구조 시뮬레이션 실행"""
-    structure_pdb, structure_name, output_dir = structure_info
+def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_queue, process_id):
+    """GPU 할당된 단일 구조 시뮬레이션 실행 (배치 처리용)"""
+    structure_pdb, structure_name, output_dir, binding_site_residues, pdb_code = structure_info
     
     # GPU 할당받기
     assigned_gpu = gpu_queue.get()
     
     try:
-        log(f"[Process {process_id}] 구조 {structure_name} GPU {assigned_gpu}에 할당됨")
+        log(f"[Process {process_id}] 구조 {structure_name} (PDB: {pdb_code}) GPU {assigned_gpu}에 할당됨")
         
         # 현재 프로세스의 GPU 환경 설정
         original_gpu_id = globals().get('GPU_ID', '0')
@@ -1428,6 +1538,7 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
         
         current_pdb = structure_pdb
         structure_results = {
+            "pdb_code": pdb_code,
             "structure_name": structure_name,
             "structure_file": os.path.basename(structure_pdb),
             "assigned_gpu": assigned_gpu,
@@ -1467,9 +1578,9 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
                 if ENABLE_CHAIN_RESTORATION:
                     success = restore_original_chain_ids(next_structure, next_structure, first_dir)
                     if success:
-                        log(f"[Process {process_id}] 구조 {structure_name}: 다음 구조 저장 완료 (체인 복원됨)")
+                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 다음 구조 저장 완료 (체인 복원됨)")
                     else:
-                        log(f"[Process {process_id}] 구조 {structure_name}: 체인 복원 실패, 변환된 구조 사용")
+                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 체인 복원 실패, 변환된 구조 사용")
                 
                 if os.path.exists(next_structure):
                     current_pdb = next_structure
@@ -1478,24 +1589,23 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
                 if ENABLE_LONG_MD and iteration_result.get("close_contact_in_iteration", False):
                     if not need_long_md:
                         need_long_md = True
-                        log(f"[Process {process_id}] 구조 {structure_name}: 근접 접촉 감지! 긴 MD 예정")
+                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 근접 접촉 감지! 긴 MD 예정")
                         continue
                     else:
-                        log(f"[Process {process_id}] 구조 {structure_name}: 긴 MD 완료, 시뮬레이션 종료")
+                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 긴 MD 완료, 시뮬레이션 종료")
                         break
                 else:
                     need_long_md = False
             else:
                 failure_type = iteration_result.get("failure_type", "unknown")
-                if failure_type =="gromacs_error":
-                    stderr=iteration_result.get("last_stderr", "Unknown GROMACS error"))
-                    log(f"[Process {process_id}] 구조 {structure_name}: GROMACS 에러로 인한 구조 포기 - {stderr}")
+                if failure_type == "gromacs_error":
+                    stderr = iteration_result.get("last_stderr", "Unknown GROMACS error")
+                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): GROMACS 에러로 인한 구조 포기 - {stderr}")
                     raise Exception(f"Gromacs error: {stderr}")
-                elif failure_type == "max_attempt_exceeded":
-                    log(f"[Process {process_id}] 구조 {structure_name}: Iteration {iteration} 최대 시도 횟수 초과 - 처음부터 재시작")
+                elif failure_type == "max_attempts_exceeded":
+                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): Iteration {iteration} 최대 시도 횟수 초과 - 처음부터 재시작")
                 else:
-                    # iteration 실패 시 처음부터 다시 시작
-                    log(f"[Process {process_id}] 구조 {structure_name}: Iteration {iteration} 실패 - 재시작")
+                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): Iteration {iteration} 실패 - 재시작")
                 current_pdb = structure_pdb
                 iteration = 0
                 need_long_md = False
@@ -1516,9 +1626,9 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
             if os.path.exists(final_structure):
                 success = restore_original_chain_ids(final_structure, final_output, first_dir)
                 if success:
-                    log(f"[Process {process_id}] 구조 {structure_name}: 최종 구조 저장 완료 (체인 복원됨)")
+                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 최종 구조 저장 완료 (체인 복원됨)")
                 else:
-                    log(f"[Process {process_id}] 구조 {structure_name}: 최종 구조 체인 복원 실패")
+                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 최종 구조 체인 복원 실패")
                     shutil.copy(final_structure, final_output)
         
         # 구조별 결과 저장
@@ -1526,18 +1636,19 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
         with open(structure_result_file, "w") as f:
             json.dump(structure_results, f, indent=2, default=str)
         
-        log(f"[Process {process_id}] 구조 {structure_name} (GPU {assigned_gpu}) 완료: {structure_results['successful_iterations']}/{structure_results['total_iterations']} 성공")
+        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}) (GPU {assigned_gpu}) 완료: {structure_results['successful_iterations']}/{structure_results['total_iterations']} 성공")
         
         # 결과를 큐에 넣기
         results_queue.put(structure_results)
         
     except Exception as e:
-        log(f"[Process {process_id}] 구조 {structure_name} (GPU {assigned_gpu}) 오류: {e}")
+        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}) (GPU {assigned_gpu}) 오류: {e}")
         import traceback
         log(f"상세 오류: {traceback.format_exc()}")
         
         # 오류 발생 시에도 기본 결과 반환
         error_result = {
+            "pdb_code": pdb_code,
             "structure_name": structure_name,
             "structure_file": os.path.basename(structure_pdb),
             "assigned_gpu": assigned_gpu,
@@ -1556,13 +1667,34 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
         gpu_queue.put(assigned_gpu)
         log(f"[Process {process_id}] GPU {assigned_gpu} 반납됨")
 
-def run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residues):
-    """GPU 병렬 시뮬레이션 실행"""
-    log("=== GPU 병렬 시뮬레이션 시작 ===")
+def run_unified_parallel_simulation(all_structure_info):
+    """통합 병렬 시뮬레이션 실행 - 모든 PDB 파일의 모든 구조 처리"""
+    log("=== 통합 GPU 병렬 시뮬레이션 시작 ===")
     
     # GPU ID 파싱
     available_gpus = parse_gpu_ids(GPU_ID)
     max_processes = len(available_gpus)
+    
+    # 모든 구조 정보를 단일 리스트로 통합
+    all_structures = []
+    structure_counter = 0
+    
+    for pdb_info in all_structure_info:
+        pdb_code = pdb_info["pdb_code"]
+        binding_site_residues = pdb_info["binding_site_residues"]
+        output_dir = pdb_info["output_dir"]
+        
+        for structure_pdb in pdb_info["structure_pool"]:
+            structure_name = f"{pdb_code}_struct_{structure_counter:03d}"
+            structure_info = (structure_pdb, structure_name, output_dir, binding_site_residues, pdb_code)
+            all_structures.append(structure_info)
+            structure_counter += 1
+    
+    total_structures = len(all_structures)
+    total_pdbs = len(all_structure_info)
+    
+    log(f"총 {total_pdbs}개 PDB 파일에서 {total_structures}개 구조 생성됨")
+    log(f"병렬 처리: {max_processes}개 GPU 동시 사용")
     
     # 멀티프로세싱 매니저 생성
     manager = Manager()
@@ -1573,22 +1705,13 @@ def run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residue
     for gpu in available_gpus:
         gpu_queue.put(gpu)
     
-    log(f"병렬 처리: {max_processes}개 GPU 동시 사용")
-    log(f"처리할 구조 수: {len(structure_pool)}")
-    
-    # 구조 정보 리스트 준비
-    structure_infos = []
-    for i, structure_pdb in enumerate(structure_pool):
-        structure_name = f"struct_{i:02d}"
-        structure_infos.append((structure_pdb, structure_name, output_dir))
-    
     # 프로세스 리스트
     processes = []
     all_structure_results = []
     completed_count = 0
     
     # 구조별로 프로세스 생성 및 실행
-    for i, info in enumerate(structure_infos):
+    for i, structure_info in enumerate(all_structures):
         # 최대 프로세스 수만큼만 동시 실행
         if len(processes) >= max_processes:
             # 완료된 프로세스 대기
@@ -1602,7 +1725,7 @@ def run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residue
                         result = results_queue.get()
                         all_structure_results.append(result)
                         completed_count += 1
-                        log(f"[{completed_count}/{len(structure_infos)}] 구조 {result['structure_name']} 완료: {result.get('successful_iterations', 0)}회 성공")
+                        log(f"[{completed_count}/{total_structures}] 구조 {result['structure_name']} ({result['pdb_code']}) 완료: {result.get('successful_iterations', 0)}회 성공")
             
             # 아직도 최대치면 잠시 대기
             while len(processes) >= max_processes:
@@ -1617,16 +1740,16 @@ def run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residue
                             result = results_queue.get()
                             all_structure_results.append(result)
                             completed_count += 1
-                            log(f"[{completed_count}/{len(structure_infos)}] 구조 {result['structure_name']} 완료: {result.get('successful_iterations', 0)}회 성공")
+                            log(f"[{completed_count}/{total_structures}] 구조 {result['structure_name']} ({result['pdb_code']}) 완료: {result.get('successful_iterations', 0)}회 성공")
         
         # 새 프로세스 시작
         process = Process(
-            target=run_structure_simulation_with_gpu,
-            args=(info, binding_site_residues, gpu_queue, results_queue, i)
+            target=run_structure_simulation_with_gpu_batch,
+            args=(structure_info, gpu_queue, results_queue, i)
         )
         process.start()
         processes.append(process)
-        log(f"구조 {info[1]} 프로세스 시작 (PID: {process.pid})")
+        log(f"구조 {structure_info[1]} ({structure_info[4]}) 프로세스 시작 (PID: {process.pid})")
     
     # 모든 프로세스 완료 대기
     for process in processes:
@@ -1637,140 +1760,278 @@ def run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residue
         result = results_queue.get()
         all_structure_results.append(result)
         completed_count += 1
-        log(f"[{completed_count}/{len(structure_infos)}] 구조 {result['structure_name']} 완료: {result.get('successful_iterations', 0)}회 성공")
+        log(f"[{completed_count}/{total_structures}] 구조 {result['structure_name']} ({result['pdb_code']}) 완료: {result.get('successful_iterations', 0)}회 성공")
     
-    log("=== 모든 GPU 병렬 시뮬레이션 완료 ===")
-    
-    # 결과를 원래 순서대로 정렬
-    all_structure_results.sort(key=lambda x: x['structure_name'])
+    log("=== 모든 통합 GPU 병렬 시뮬레이션 완료 ===")
     
     return all_structure_results
 
+def generate_batch_summary(all_structure_results, all_structure_info, base_output_dir):
+    """배치 실행 결과 요약 생성"""
+    log("=== 배치 결과 요약 생성 ===")
+    
+    # PDB별로 결과 그룹화
+    pdb_results = {}
+    for result in all_structure_results:
+        pdb_code = result["pdb_code"]
+        if pdb_code not in pdb_results:
+            pdb_results[pdb_code] = []
+        pdb_results[pdb_code].append(result)
+    
+    # 전체 통계
+    total_pdbs = len(all_structure_info)
+    total_structures = len(all_structure_results)
+    successful_structures = len([r for r in all_structure_results if r.get("successful_iterations", 0) > 0])
+    
+    # PDB별 최고 성능 구조 찾기
+    pdb_summaries = []
+    successful_pdbs = 0
+    
+    for pdb_info in all_structure_info:
+        pdb_code = pdb_info["pdb_code"]
+        pdb_structures = pdb_results.get(pdb_code, [])
+        
+        if not pdb_structures:
+            continue
+        
+        # 해당 PDB의 최고 성능 구조 찾기
+        best_structure = None
+        max_success = 0
+        
+        for structure_result in pdb_structures:
+            success_count = structure_result.get("successful_iterations", 0)
+            if success_count > max_success:
+                max_success = success_count
+                best_structure = structure_result
+        
+        pdb_summary = {
+            "pdb_code": pdb_code,
+            "original_file": pdb_info["original_file"],
+            "chain1": pdb_info["chain1"],
+            "chain2": pdb_info["chain2"],
+            "ligand_chain": pdb_info["ligand_chain"],
+            "receptor_chain": pdb_info["receptor_chain"],
+            "total_structures": len(pdb_structures),
+            "successful_structures": len([r for r in pdb_structures if r.get("successful_iterations", 0) > 0]),
+            "max_successful_iterations": max_success,
+            "best_structure_name": best_structure["structure_name"] if best_structure else None,
+            "has_successful_result": max_success > 0
+        }
+        
+        if max_success > 0:
+            successful_pdbs += 1
+            
+            # 최고 성능 구조의 최종 결과를 PDB 레벨로 복사
+            pdb_output_dir = pdb_info["output_dir"]
+            best_struct_dir = os.path.join(pdb_output_dir, f"structure_{best_structure['structure_name']}")
+            best_final_structure = os.path.join(best_struct_dir, "final_structure.pdb")
+            
+            if os.path.exists(best_final_structure):
+                pdb_final_result = os.path.join(pdb_output_dir, f"{pdb_code}_best_result.pdb")
+                shutil.copy(best_final_structure, pdb_final_result)
+                pdb_summary["best_result_file"] = pdb_final_result
+                log(f"PDB {pdb_code} 최고 결과 복사: {os.path.basename(pdb_final_result)}")
+        
+        pdb_summaries.append(pdb_summary)
+    
+    # 전체 배치 요약
+    batch_summary = {
+        "batch_execution_summary": {
+            "start_time": datetime.now().isoformat(),  # 실제로는 시작 시간을 전달받아야 함
+            "end_time": datetime.now().isoformat(),
+            "total_pdbs": total_pdbs,
+            "successful_pdbs": successful_pdbs,
+            "pdb_success_rate": f"{successful_pdbs}/{total_pdbs} ({successful_pdbs*100//total_pdbs if total_pdbs > 0 else 0}%)",
+            "total_structures": total_structures,
+            "successful_structures": successful_structures,
+            "structure_success_rate": f"{successful_structures}/{total_structures} ({successful_structures*100//total_structures if total_structures > 0 else 0}%)",
+            "output_directory": base_output_dir
+        },
+        "pdb_results": pdb_summaries,
+        "detailed_structure_results": all_structure_results
+    }
+    
+    # 배치 요약 저장
+    batch_summary_file = os.path.join(base_output_dir, "batch_summary.json")
+    with open(batch_summary_file, "w", encoding='utf-8') as f:
+        json.dump(batch_summary, f, indent=2, ensure_ascii=False, default=str)
+    
+    # 성공한 PDB만의 요약 테이블 생성
+    if successful_pdbs > 0:
+        success_summary_file = os.path.join(base_output_dir, "successful_pdbs_summary.txt")
+        with open(success_summary_file, "w", encoding='utf-8') as f:
+            f.write("=== 성공한 PDB 파일들 요약 ===\n\n")
+            f.write(f"{'PDB코드':<10} {'체인':<8} {'최대성공':<8} {'구조수':<8} {'최고구조':<20} {'결과파일':<30}\n")
+            f.write("-" * 90 + "\n")
+            
+            for pdb_summary in pdb_summaries:
+                if pdb_summary["has_successful_result"]:
+                    f.write(f"{pdb_summary['pdb_code']:<10} "
+                           f"{pdb_summary['chain1']}-{pdb_summary['chain2']:<6} "
+                           f"{pdb_summary['max_successful_iterations']:<8} "
+                           f"{pdb_summary['successful_structures']}/{pdb_summary['total_structures']:<6} "
+                           f"{pdb_summary['best_structure_name']:<20} "
+                           f"{os.path.basename(pdb_summary.get('best_result_file', 'N/A')):<30}\n")
+    
+    log(f"배치 요약 저장 완료: {batch_summary_file}")
+    log(f"성공한 PDB: {successful_pdbs}/{total_pdbs}")
+    log(f"성공한 구조: {successful_structures}/{total_structures}")
+    
+    return batch_summary
+
+def save_execution_log(base_output_dir, start_time, end_time, all_structure_info, all_structure_results):
+    """실행 로그 저장"""
+    execution_log = {
+        "execution_info": {
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "duration_seconds": int((end_time - start_time).total_seconds()),
+            "total_pdbs_processed": len(all_structure_info),
+            "total_structures_processed": len(all_structure_results)
+        },
+        "pdb_files_info": [
+            {
+                "pdb_code": info["pdb_code"],
+                "original_file": info["original_file"],
+                "chains": f"{info['chain1']}-{info['chain2']}",
+                "structures_generated": len(info["structure_pool"]),
+                "output_directory": info["output_dir"]
+            }
+            for info in all_structure_info
+        ],
+        "gpu_usage": {
+            "available_gpus": parse_gpu_ids(GPU_ID),
+            "max_parallel_processes": len(parse_gpu_ids(GPU_ID))
+        },
+        "configuration": {
+            "max_iterations": MAX_ITERATIONS,
+            "max_attempts": MAX_ATTEMPTS,
+            "simulation_time_ns": SIMULATION_TIME_NS,
+            "enable_multi_direction_separation": ENABLE_MULTI_DIRECTION_SEPARATION,
+            "enable_rotational_variants": ENABLE_ROTATIONAL_VARIANTS,
+            "enable_long_md": ENABLE_LONG_MD
+        }
+    }
+    
+    log_file = os.path.join(base_output_dir, "execution_log.json")
+    with open(log_file, "w", encoding='utf-8') as f:
+        json.dump(execution_log, f, indent=2, ensure_ascii=False, default=str)
+    
+    log(f"실행 로그 저장: {log_file}")
+
 # ===== 메인 함수 =====
 def main():
-    if len(sys.argv) < 4:
-        print("사용법: python simple_sumd.py <input_pdb> <chain1> <chain2> [output_dir]")
+    if len(sys.argv) < 2:
+        print("사용법:")
+        print("  단일 파일: python simple_sumd.py <input_pdb> <chain1> <chain2> [output_dir]")
+        print("  배치 처리: python simple_sumd.py <input_directory> [output_dir]")
+        print("  배치 파일명 형식: (pdb_code)_(receptor_chain)_(ligand_chain)_processed.pdb")
         sys.exit(1)
     
-    input_pdb = sys.argv[1]
-    chain1 = sys.argv[2]
-    chain2 = sys.argv[3]
-    output_dir = sys.argv[4] if len(sys.argv) > 4 else "sumd_output"
+    start_time = datetime.now()
+    input_path = sys.argv[1]
     
-    output_dir=os.path.abspath(output_dir)
+    # 입력이 디렉토리인지 파일인지 확인
+    if os.path.isdir(input_path):
+        # 배치 처리 모드
+        output_dir = sys.argv[2] if len(sys.argv) > 2 else "batch_sumd_output"
+        mode_name = "Batch Simple SuMD"
+    else:
+        # 단일 파일 처리 모드
+        if len(sys.argv) < 4:
+            print("단일 파일 사용법: python simple_sumd.py <input_pdb> <chain1> <chain2> [output_dir]")
+            sys.exit(1)
+        
+        # 단일 파일을 위한 임시 디렉토리 생성 및 파일명 변경
+        chain1 = sys.argv[2]
+        chain2 = sys.argv[3]
+        output_dir = sys.argv[4] if len(sys.argv) > 4 else "sumd_output"
+        
+        # 단일 파일을 배치 형식으로 변환
+        temp_input_dir = os.path.join(os.path.dirname(os.path.abspath(input_path)), "temp_batch_input")
+        if os.path.exists(temp_input_dir):
+            shutil.rmtree(temp_input_dir)
+        os.makedirs(temp_input_dir)
+        
+        # 파일명을 배치 형식으로 변경하여 복사
+        original_name = os.path.basename(input_path).replace('.pdb', '')
+        batch_formatted_name = f"{original_name}_{chain1}_{chain2}_processed.pdb"
+        temp_input_file = os.path.join(temp_input_dir, batch_formatted_name)
+        shutil.copy(input_path, temp_input_file)
+        
+        input_path = temp_input_dir
+        mode_name = "Simple SuMD (단일 파일)"
+    
+    output_dir = os.path.abspath(output_dir)
+    
     # 출력 디렉토리 준비
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
     
-    log("=== Simple SuMD 시작 (모든 구조에 대한 완전한 시뮬레이션) ===")
-    log(f"입력 PDB: {input_pdb}")
-    log(f"체인: {chain1} - {chain2}")
+    log(f"=== {mode_name} 시작 ===")
+    log(f"입력 경로: {input_path}")
     log(f"출력 디렉토리: {output_dir}")
     log(f"최대 iterations: {MAX_ITERATIONS}")
     log(f"다방향 이격: {'활성화' if ENABLE_MULTI_DIRECTION_SEPARATION else '비활성화'}")
     log(f"회전 변형: {'활성화' if ENABLE_ROTATIONAL_VARIANTS else '비활성화'}")
     
-    # 원본 chain 정보 저장
-    # original_chains = save_original_chain_info(input_pdb, chain1, chain2)
-    # if original_chains is None:
-    #     log("원본 chain 정보 저장 실패")
-    #     sys.exit(1)
-    
-    # 타겟 체인만 추출
-    target_pdb = os.path.join(output_dir, "target_chains.pdb")
-    if not extract_target_chains_pdb(input_pdb, target_pdb, chain1, chain2):
-        log("타겟 체인 추출 실패")
-        sys.exit(1)
-    
-    # Ligand/Receptor 식별 및 Binding site 정의
-    ligand_chain, receptor_chain = identify_ligand_receptor(target_pdb)
-    if ligand_chain is None or receptor_chain is None:
-        log("Ligand/Receptor 식별 실패")
-        sys.exit(1)
-    
-    binding_site_residues = define_binding_site(target_pdb, ligand_chain, receptor_chain, distance_cutoff=BINDING_SITE_CUTOFF)
-    if binding_site_residues is None:
-        log("Binding site 정의 실패")
-        sys.exit(1)
-    
-    # 구조 풀 생성
-    log("=== 구조 풀 생성 ===")
-    structure_pool = create_initial_structure_pool(target_pdb, chain1, chain2, output_dir)
-    
-    log(f"생성된 구조 수: {len(structure_pool)}")
-    
-    # 각 구조에 대해 완전한 시뮬레이션 수행
-    all_results = {
-        "start_time": datetime.now().isoformat(),
-        "input_pdb": input_pdb,
-        "chains": [chain1, chain2],
-        "ligand_chain": ligand_chain,
-        "receptor_chain": receptor_chain,
-        "binding_site_residues": binding_site_residues,
-        "total_structures": len(structure_pool),
-        "structure_results": []
-    }
-    
-    # 시뮬레이션 설정 정보 로깅
-    log("=== 시뮬레이션 설정 정보 ===")
-    log(f"입력 PDB: {all_results['input_pdb']}")
-    log(f"체인: {all_results['chains'][0]} - {all_results['chains'][1]}")
-    log(f"Ligand: {all_results['ligand_chain']} | Receptor: {all_results['receptor_chain']}")
-    log(f"Binding site 잔기 수: {len(all_results['binding_site_residues'])}")
-    log(f"총 구조 수: {all_results['total_structures']}")
-    log(f"시작 시간: {all_results['start_time']}")
-    log("=" * 50)
-    
-    # GPU 병렬 시뮬레이션 실행
-    log("=== GPU 병렬 시뮬레이션 시작 ===")
-
-    # 병렬 실행
-    all_structure_results = []
-    
-    all_structure_results = run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residues)
-    all_structure_results.sort(key=lambda x: x['structure_name'])
-    all_results["structure_results"] = all_structure_results
-    
-    log("=== 모든 GPU 병렬 시뮬레이션 완료 ===")
-    
-    # 전체 결과 종합
-    all_results["end_time"] = datetime.now().isoformat()
-    all_results["total_successful_structures"] = len([r for r in all_results["structure_results"] 
-                                                     if r["successful_iterations"] > 0])
-    
-    # 최고 성능 구조 식별
-    best_structure = None
-    max_success = 0
-    for result in all_results["structure_results"]:
-        if result["successful_iterations"] > max_success:
-            max_success = result["successful_iterations"]
-            best_structure = result["structure_name"]
-    
-    if best_structure:
-        all_results["best_structure"] = best_structure
-        all_results["max_successful_iterations"] = max_success
+    try:
+        # 1단계: 모든 PDB 파일의 구조 풀 생성 (단일 파일도 동일하게 처리)
+        all_structure_info = create_structure_pools_for_all_pdbs(input_path, output_dir)
         
-        # 최고 성능 구조의 최종 결과를 전체 결과로 복사
-        best_struct_dir = os.path.join(output_dir, f"structure_{best_structure}")
-        best_final_structure = os.path.join(best_struct_dir, "final_structure.pdb")
-        if os.path.exists(best_final_structure):
-            overall_final = os.path.join(output_dir, "accepted_result.pdb")
-            shutil.copy(best_final_structure, overall_final)
-            log(f"최고 성능 구조의 최종 결과 복사: {overall_final}")
-    
-    # 최종 결과 저장
-    final_result_file = os.path.join(output_dir, "final_results.json")
-    with open(final_result_file, "w") as f:
-        json.dump(all_results, f, indent=2, default=str)
-    
-    log("=== Simple SuMD 완료 ===")
-    log(f"처리된 구조 수: {len(structure_pool)}")
-    log(f"성공한 구조 수: {all_results['total_successful_structures']}")
-    log(f"전체 성공률: {all_results['total_successful_structures']}/{len(structure_pool)}")
-    if best_structure:
-        log(f"최고 성능 구조: {best_structure} ({max_success}회 성공)")
-    log(f"최종 결과: {final_result_file}")
+        if not all_structure_info:
+            log("처리할 PDB 파일이 없습니다.")
+            sys.exit(1)
+        
+        # 2단계: 통합 병렬 시뮬레이션 실행
+        all_structure_results = run_unified_parallel_simulation(all_structure_info)
+        
+        # 3단계: 결과 정리 및 요약
+        end_time = datetime.now()
+        batch_summary = generate_batch_summary(all_structure_results, all_structure_info, output_dir)
+        save_execution_log(output_dir, start_time, end_time, all_structure_info, all_structure_results)
+        
+        # 단일 파일 모드인 경우 최고 결과를 메인 디렉토리에도 복사
+        if not os.path.isdir(sys.argv[1]):  # 원래 입력이 파일이었던 경우
+            # 임시 디렉토리 정리
+            if os.path.exists(temp_input_dir):
+                shutil.rmtree(temp_input_dir)
+            
+            # 최고 성능 구조의 결과를 메인 디렉토리로 복사
+            if len(all_structure_info) == 1 and len(all_structure_results) > 0:
+                # 가장 성공적인 구조 찾기
+                best_result = max(all_structure_results, key=lambda x: x.get("successful_iterations", 0))
+                if best_result.get("successful_iterations", 0) > 0:
+                    pdb_info = all_structure_info[0]
+                    pdb_output_dir = pdb_info["output_dir"]
+                    best_struct_dir = os.path.join(pdb_output_dir, f"structure_{best_result['structure_name']}")
+                    best_final_structure = os.path.join(best_struct_dir, "final_structure.pdb")
+                    
+                    if os.path.exists(best_final_structure):
+                        overall_final = os.path.join(output_dir, "accepted_result.pdb")
+                        shutil.copy(best_final_structure, overall_final)
+                        log(f"단일 파일 모드: 최고 결과 복사 완료 - {overall_final}")
+        
+        log(f"=== {mode_name} 완료 ===")
+        total_duration = int((end_time - start_time).total_seconds())
+        log(f"총 소요시간: {total_duration}초 ({total_duration // 60}분 {total_duration % 60}초)")
+        log(f"처리된 PDB 수: {len(all_structure_info)}")
+        log(f"생성된 구조 수: {len(all_structure_results)}")
+        log(f"성공한 구조 수: {len([r for r in all_structure_results if r.get('successful_iterations', 0) > 0])}")
+        log(f"결과 요약: {os.path.join(output_dir, 'batch_summary.json')}")
+        
+    except Exception as e:
+        log(f"처리 중 오류: {e}")
+        import traceback
+        log(f"상세 오류: {traceback.format_exc()}")
+        
+        # 단일 파일 모드인 경우 임시 디렉토리 정리
+        if not os.path.isdir(sys.argv[1]) and 'temp_input_dir' in locals():
+            if os.path.exists(temp_input_dir):
+                shutil.rmtree(temp_input_dir)
+        
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
