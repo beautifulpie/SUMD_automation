@@ -600,7 +600,7 @@ def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_outpu
         
         if result.returncode != 0:
             log(f"Return code 오류 ({result.returncode}): {result.stderr}")
-            return False
+            return False, result.returncode, result.stderr
         
         if expected_output:
             if isinstance(expected_output, str):
@@ -610,18 +610,18 @@ def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_outpu
                 full_path = os.path.join(cwd, output_file) if cwd else output_file
                 if not os.path.exists(full_path):
                     log(f"목적 파일 생성 실패: {output_file}")
-                    return False
+                    return False, result.returncode, f"목적 파일 생성 실패: {output_file}"
                 elif os.path.getsize(full_path) == 0:
                     log(f"빈 파일 생성: {output_file}")
-                    return False
+                    return False, result.returncode, f"빈 파일 생성: {output_file}"
         
-        return True
+        return True, result.returncode, "Success"
     except subprocess.TimeoutExpired:
         log(f"명령어 실행 시간 초과: {cmd}")
-        return False
+        return False, 1, f"명령어 실행 시간 초과: {cmd}"
     except Exception as e:
         log(f"명령어 실행 실패: {e}")
-        return False
+        return False, 1, f"명령어 실행 실패: {e}"
     
 def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_output=[], timeout=3600, max_retries=2, is_long_md=False):
     """GROMACS mdrun을 checkpoint 복구 기능과 함께 실행"""
@@ -672,7 +672,7 @@ def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_outp
                 
                 if all_files_exist:
                     log(f"MD 실행 성공 (시도 {attempt + 1})")
-                    return True
+                    return True, result.returncode, result.stderr
                 else:
                     log(f"MD 실행 후 출력 파일 확인 실패 (시도 {attempt + 1})")
             else:
@@ -693,7 +693,7 @@ def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_outp
             time.sleep(5)
     
     log(f"MD 실행 최종 실패: {max_retries + 1}회 시도 모두 실패")
-    return False
+    return False, result.returncode, result.stderr
 
 def create_mdp_files(work_dir, long_md=False):
     """MDP 파일들 생성 - SD integrator 및 랜덤 시드 적용"""
@@ -916,25 +916,28 @@ def run_gromacs_pipeline(work_dir, input_pdb, long_md=False):
     log("pdb2gmx 실행")
     cmd = f"echo '1\\n1' | gmx pdb2gmx -f {input_pdb} -o complex.gro -p topol.top \
           -water {WATER_MODEL} -ff {FORCE_FIELD} -ignh"
-    success = run_command_with_output_check(cmd, work_dir, expected_output=["complex.gro", "topol.top"])
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["complex.gro", "topol.top"])
     stages.append({"stage": "pdb2gmx", "success": success})
     if not success:
+        stages[-1]["stderr"]=stderr
         return stages
     
     # 2. editconf
     log("editconf 실행")
     cmd = f"gmx editconf -f complex.gro -o box.gro -c -d {BOX_DISTANCE} -bt cubic"
-    success = run_command_with_output_check(cmd, work_dir, expected_output="box.gro")
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="box.gro")
     stages.append({"stage": "editconf", "success": success})
     if not success:
+        stages[-1]["stderr"]=stderr
         return stages
     
     # 3. solvate
     log("solvate 실행")
     cmd = "gmx solvate -cp box.gro -cs spc216.gro -o solv.gro -p topol.top"
-    success = run_command_with_output_check(cmd, work_dir, expected_output="solv.gro")
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="solv.gro")
     stages.append({"stage": "solvate", "success": success})
     if not success:
+        stages[-1]["stderr"]=stderr
         return stages
     
     # 4. ions grompp
@@ -953,17 +956,19 @@ rvdw = 1.0
 pbc = xyz
 """)
     cmd = f"gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn {MAX_WARNINGS}"
-    success = run_command_with_output_check(cmd, work_dir, expected_output="ions.tpr")
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="ions.tpr")
     stages.append({"stage": "ions_grompp", "success": success})
     if not success:
+        stages[-1]["stderr"]=stderr
         return stages
     
     # 5. genion
     log("genion 실행")
     cmd = "echo 'SOL' | gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral"
-    success = run_command_with_output_check(cmd, work_dir, expected_output="solv_ions.gro")
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="solv_ions.gro")
     stages.append({"stage": "genion", "success": success})
     if not success:
+        stages[-1]["stderr"]=stderr
         return stages
     
     # MDP 파일들 생성
@@ -972,44 +977,47 @@ pbc = xyz
     # 6. EM
     log("EM 실행")
     cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
-    success = run_command_with_output_check(cmd, work_dir, expected_output="em.tpr")
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="em.tpr")
     if success:
         cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm em -ntomp {NTOMP} \
               -nb gpu -gpu_id {GPU_ID}"
-        success = run_command_with_output_check(cmd, work_dir, expected_output=["em.gro", "em.edr"])
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["em.gro", "em.edr"])
     stages.append({"stage": "em", "success": success})
     if not success:
+        stages[-1]["stderr"]=stderr
         return stages
     
     # 7. NVT
     log("NVT 실행")
     cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
-    success = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
     if success:
         cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} \
               -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
-        success = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
     stages.append({"stage": "nvt", "success": success})
     if not success:
+        stages[-1]["stderr"]=stderr
         return stages
     
     # 8. NPT
     log("NPT 실행")
     cmd = f"gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt.tpr -maxwarn {MAX_WARNINGS}"
-    success = run_command_with_output_check(cmd, work_dir, expected_output="npt.tpr")
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt.tpr")
     if success:
         cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt -ntomp {NTOMP} \
               -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
-        success = run_command_with_output_check(cmd, work_dir, expected_output=["npt.gro", "npt.cpt"])
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt.gro", "npt.cpt"])
     stages.append({"stage": "npt", "success": success})
     if not success:
+        stages[-1]["stderr"]=stderr
         return stages
     
     # 9. MD
     md_label = "긴 MD" if long_md else "MD"
     log(f"{md_label} 실행")
     cmd = f"gmx grompp -f md.mdp -c npt.gro -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
-    success = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
     if success:
         timeout = TIMEOUT_LONG_MD if long_md else 3600
         max_retries = 2 if long_md else 0  # Long MD만 재시작 시도
@@ -1017,14 +1025,17 @@ pbc = xyz
         -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
         if long_md:
             log(f"{md_label} - checkpoint 복구 기능 활성화 (최대 {max_retries}회 재시작)")
-            success = run_mdrun_with_checkpoint_recovery(
+            success,returncode, stderr = run_mdrun_with_checkpoint_recovery(
                 cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout, max_retries=max_retries, is_long_md=True
             )
         else:
-            success = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout)
+            success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout)
 
     stages.append({"stage": md_label, "success": success})
-    
+
+    if not success:
+        stages[-1]["stderr"]=stderr
+
     return stages
 
 # ===== 체인 복원 함수들 =====
@@ -1366,15 +1377,33 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, lon
                 "long_md": long_md,
                 "close_contact_in_iteration": result.get("close_contact_detected", False)
             }
+        else:
+            if result.get('stages') and result['stages'] and result['stages'][-1].get('stderr', 0):
+                log(f"Iteration {iteration_num} 실패: {attempt}번 시도에서 오류 실패")
+                return {
+                    "iteration": iteration_num,
+                    "success": False,
+                    "attempts_used": attempt,
+                    "final_result": result,
+                    "long_md": long_md,
+                    "close_contact_in_iteration": False,
+                    "last_stderr": result["stages"][-1]["stderr"],
+                    "failure_type": "gromacs_error"
+                }
+            else:
+                # 기울기 실패 등 다른 이유로 실패 - 다음 attempt 계속 시도
+                log(f"Iteration {iteration_num} Attempt {attempt} 실패 (기울기 조건 불만족 등) - 다음 attempt 시도")
+
     
     log(f"Iteration {iteration_num} 실패: {MAX_ATTEMPTS}번 시도 모두 실패")
     return {
         "iteration": iteration_num,
         "success": False,
         "attempts_used": MAX_ATTEMPTS,
-        "final_result": None,
+        "final_result": result,
         "long_md": long_md,
-        "close_contact_in_iteration": False
+        "close_contact_in_iteration": False,
+        "failure_type": "max_attempts_exceeded"
     }
 
 def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu_queue, results_queue, process_id):
@@ -1457,8 +1486,16 @@ def run_structure_simulation_with_gpu(structure_info, binding_site_residues, gpu
                 else:
                     need_long_md = False
             else:
-                # iteration 실패 시 처음부터 다시 시작
-                log(f"[Process {process_id}] 구조 {structure_name}: Iteration {iteration} 실패 - 재시작")
+                failure_type = iteration_result.get("failure_type", "unknown")
+                if failure_type =="gromacs_error":
+                    stderr=iteration_result.get("last_stderr", "Unknown GROMACS error"))
+                    log(f"[Process {process_id}] 구조 {structure_name}: GROMACS 에러로 인한 구조 포기 - {stderr}")
+                    raise Exception(f"Gromacs error: {stderr}")
+                elif failure_type == "max_attempt_exceeded":
+                    log(f"[Process {process_id}] 구조 {structure_name}: Iteration {iteration} 최대 시도 횟수 초과 - 처음부터 재시작")
+                else:
+                    # iteration 실패 시 처음부터 다시 시작
+                    log(f"[Process {process_id}] 구조 {structure_name}: Iteration {iteration} 실패 - 재시작")
                 current_pdb = structure_pdb
                 iteration = 0
                 need_long_md = False
@@ -1688,15 +1725,8 @@ def main():
     # GPU 병렬 시뮬레이션 실행
     log("=== GPU 병렬 시뮬레이션 시작 ===")
 
-    # 구조 정보 리스트 준비
-    structure_infos = []
-    for i, structure_pdb in enumerate(structure_pool):
-        structure_name = f"struct_{i:02d}"
-        structure_infos.append((structure_pdb, structure_name, output_dir))
-    
     # 병렬 실행
     all_structure_results = []
-    # completed_count = 0
     
     all_structure_results = run_parallel_gpu_simulation(structure_pool, output_dir, binding_site_residues)
     all_structure_results.sort(key=lambda x: x['structure_name'])
