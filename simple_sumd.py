@@ -241,7 +241,7 @@ def apply_structure_separation(input_pdb, output_pdb, separation_vector, distanc
     except Exception as e:
         log(f"구조 이격 적용 실패: {e}")
         return False
-    
+
 def create_rotation_matrix(axis, angle_degrees):
     """축 기준 회전 행렬 생성 (Rodrigues' rotation formula)"""
     angle = math.radians(angle_degrees)
@@ -407,21 +407,22 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
         # 더 작은 체인 결정
         chain_to_move = chain1 if chain_sizes.get(chain1, 0) <= chain_sizes.get(chain2, 0) else chain2
         log(f"이동할 체인: {chain_to_move} (크기: {chain_sizes.get(chain_to_move, 0)} 원자)")
-        chain_to_stay = chain1 if chain_sizes.get(chain1, 0) > chain_sizes.get(chain2, 0) else chain2
-        log(f"이동할 체인: {chain_to_stay} (크기: {chain_sizes.get(chain_to_stay, 0)} 원자)")
+        chain_to_stay = chain1 if chain_sizes.get(chain1, 0) >= chain_sizes.get(chain2, 0) else chain2
+        log(f"고정될 체인: {chain_to_stay} (크기: {chain_sizes.get(chain_to_stay, 0)} 원자)")
         
         # 1단계: 분리 축 계산
-        separation_vector, chain_centers = calculate_separation_axis(input_pdb, chain1, chain2)
+        separation_vector, chain_centers = calculate_separation_axis(input_pdb, chain_to_stay, chain_to_move)
         if separation_vector is None:
             log("분리 축 계산 실패 - 원본 구조 사용")
             structure_pool = [input_pdb]
             return structure_pool
-        
+        # log(f"{separation_vector}")
         # 2단계: 다방향 벡터 생성 (원뿔형)
         direction_vectors = generate_multi_direction_vectors(separation_vector)
         
         # 3단계: 각 방향으로 이격된 구조 생성
         base_structures = []
+        
         for i, direction in enumerate(direction_vectors):
             separated_pdb = os.path.join(pool_dir, f"separated_{i}.pdb")
             
@@ -1021,7 +1022,7 @@ pbc = xyz
             )
         else:
             success = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout)
-    
+
     stages.append({"stage": md_label, "success": success})
     
     return stages
