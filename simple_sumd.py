@@ -169,6 +169,32 @@ def handle_distance_calculations(default_distance=float('inf')):
         suppress_traceback=True
     )
 
+# ===== 간단한 유틸리티 함수들 =====
+def ensure_clean_dir(path):
+    """기존 디렉토리 삭제 후 새로 생성 - 가장 많이 반복되는 패턴"""
+    if os.path.exists(path):
+        shutil.rmtree(path)
+    os.makedirs(path)
+
+def parse_filename_parts(filepath, separator='_'):
+    """범용 파일명 파싱 헬퍼"""
+    filename = os.path.basename(filepath)
+    filename = filename.replace('.pdb', '').replace('_processed', '')
+    return filename.split(separator)
+
+# ===== 파일명 패턴 상수화 =====
+FILENAME_PATTERNS = {
+    'batch_pdb': "{pdb_code}_{chain1}_{chain2}_processed.pdb",
+    'variant_rotation': "{base_name}_rot{num}.pdb",
+    'variant_separation': "separated_{num}.pdb",
+    'target_chains': "target_chains.pdb",
+    'final_structure': "final_structure.pdb",
+    'next_structure': "next_structure.pdb"
+}
+
+def format_filename(pattern_key, **kwargs):
+    """표준 파일명 생성"""
+    return FILENAME_PATTERNS[pattern_key].format(**kwargs)
 
 class StructureLogger:
     def __init__(self, name="simple_sumd", level=logging.INFO):#, log_file=None):
@@ -550,7 +576,9 @@ def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
         
         rotation_matrix = create_rotation_matrix(axis, angle)
         
-        variant_pdb = os.path.join(output_dir, f"{base_name}_rot{variant_count}.pdb")
+        variant_pdb = os.path.join(output_dir, format_filename('variant_rotation', 
+                                                              base_name=base_name, 
+                                                              num=variant_count))
         try:        
             if apply_rotational_transform(base_pdb, variant_pdb, rotation_matrix, center_point, chain_to_move):
                 variants.append(variant_pdb)
@@ -577,9 +605,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
     try:
         # 구조 풀 디렉토리 생성
         pool_dir = os.path.join(output_dir, "structure_pool")
-        if os.path.exists(pool_dir):
-            shutil.rmtree(pool_dir)
-        os.makedirs(pool_dir)
+        ensure_clean_dir(pool_dir)
 
         # 더 작은 체인을 이동시키기 위해 체인 크기 비교
         chain_sizes = {}
@@ -614,7 +640,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
         base_structures = []
         
         for i, direction in enumerate(direction_vectors):
-            separated_pdb = os.path.join(pool_dir, f"separated_{i}.pdb")
+            separated_pdb = os.path.join(pool_dir, format_filename('variant_separation', num=i))
             
             if apply_structure_separation(input_pdb, separated_pdb, direction, 
                                         SEPARATION_DISTANCE, chain_to_move):
@@ -713,18 +739,10 @@ def define_binding_site(input_pdb, ligand_chain, receptor_chain, distance_cutoff
 @handle_structure_operations(default_return=(None,None,None), context_info="PDB 파일명 파싱")
 def parse_pdb_filename(pdb_file_path):
     """PDB 파일명에서 정보 추출"""
-    filename = os.path.basename(pdb_file_path)
-    filename = filename.replace('.pdb', '')
-    
-    # _processed 제거
-    if filename.endswith('_processed'):
-        filename = filename[:-10]
-    
-    # 언더스코어로 분할
-    parts = filename.split('_')
+    parts = parse_filename_parts(pdb_file_path)
     
     if len(parts) != 3:
-        raise ValueError(f"잘못된 파일명 형식: {filename} (예상 형식: pdb_receptor_ligand)")
+        raise ValueError(f"잘못된 파일명 형식: {os.path.basename(pdb_file_path)} (예상 형식: pdb_receptor_ligand)")
     
     pdb_code, receptor_chain, ligand_chain = parts
     return pdb_code, receptor_chain, ligand_chain
@@ -763,12 +781,10 @@ def process_single_pdb_file(pdb_file, base_output_dir):
         
         # 개별 PDB 출력 디렉토리 생성
         pdb_output_dir = os.path.join(base_output_dir, f"{pdb_info['pdb_code']}_{pdb_info['chain1']}_{pdb_info['chain2']}")
-        if os.path.exists(pdb_output_dir):
-            shutil.rmtree(pdb_output_dir)
-        os.makedirs(pdb_output_dir)
+        ensure_clean_dir(pdb_output_dir)
         
         # 타겟 체인 추출
-        target_pdb = os.path.join(pdb_output_dir, "target_chains.pdb")
+        target_pdb = os.path.join(pdb_output_dir, format_filename('target_chains'))
         if not extract_target_chains_pdb(pdb_file, target_pdb, pdb_info['chain1'], pdb_info['chain2']):
             logger.error("타겟 체인 추출 실패")
             return None
@@ -1585,13 +1601,11 @@ def create_next_iteration_structure(work_dir, output_pdb, long_md=False):
 
 def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, long_md=False):
     """단일 attempt 실행"""
-    log(f"Attempt {attempt_num} 시작 {'(긴 MD)' if long_md else ''}")
+    logger.info(f"Attempt {attempt_num} 시작 {'(긴 MD)' if long_md else ''}")
     
     # 작업 디렉토리 준비
     attempt_dir = os.path.join(work_dir, f"attempt_{attempt_num}")
-    if os.path.exists(attempt_dir):
-        shutil.rmtree(attempt_dir)
-    os.makedirs(attempt_dir)
+    ensure_clean_dir(attempt_dir)
     
     # 입력 PDB 복사
     shutil.copy(input_pdb, os.path.join(attempt_dir, "input.pdb"))
@@ -1721,9 +1735,7 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
         
         # iteration 디렉토리 생성
         iter_dir = os.path.join(struct_dir, f'iteration_{iteration}')
-        if os.path.exists(iter_dir):
-            shutil.rmtree(iter_dir)
-        os.makedirs(iter_dir)
+        ensure_clean_dir(iter_dir)
         
         if first_dir is None:
             first_dir = os.path.join(iter_dir, 'attempt_1')
@@ -1841,9 +1853,7 @@ def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_q
         
         # 구조별 출력 디렉토리 생성
         struct_dir = os.path.join(output_dir, f"structure_{structure_name}")
-        if os.path.exists(struct_dir):
-            shutil.rmtree(struct_dir)
-        os.makedirs(struct_dir)
+        ensure_clean_dir(struct_dir)
         
         # 결과 구조 초기화
         structure_results = initialize_structure_results(pdb_code, structure_name, structure_pdb, assigned_gpu, process_id)
@@ -2214,12 +2224,13 @@ def handle_single_file_mode_input(args):
 def normalize_single_file_to_batch_format(input_path, chain1, chain2):
     """단일 파일을 배치 형식으로 정규화"""
     temp_input_dir = os.path.join(os.path.dirname(os.path.abspath(input_path)), "temp_batch_input")
-    if os.path.exists(temp_input_dir):
-        shutil.rmtree(temp_input_dir)
-    os.makedirs(temp_input_dir)
+    ensure_clean_dir(temp_input_dir)
     
     original_name = os.path.basename(input_path).replace('.pdb', '')
-    batch_formatted_name = f"{original_name}_{chain1}_{chain2}_processed.pdb"
+    batch_formatted_name = format_filename('batch_pdb', 
+                                          pdb_code=original_name, 
+                                          chain1=chain1, 
+                                          chain2=chain2)
     temp_input_file = os.path.join(temp_input_dir, batch_formatted_name)
     shutil.copy(input_path, temp_input_file)
     
@@ -2227,12 +2238,9 @@ def normalize_single_file_to_batch_format(input_path, chain1, chain2):
 
 def execute_simulation_pipeline(config):
     """시뮬레이션 파이프라인 실행"""
-    output_dir = os.path.abspath(config["output_dir"])
-    
     # 출력 디렉토리 준비
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-    os.makedirs(output_dir)
+    output_dir = os.path.abspath(config["output_dir"])
+    ensure_clean_dir(output_dir)
     
     logger.info(f"=== {config['mode_name']} 시작 ===")
     logger.info(f"입력 경로: {config['input_path']}")
