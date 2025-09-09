@@ -15,6 +15,9 @@ from datetime import datetime
 from Bio.PDB import Structure, Model, Chain as PDBChain, Residue as PDBResidue, Atom
 from Bio.PDB.PDBParser import PDBParser
 from Bio.PDB.PDBIO import PDBIO,Select
+import logging
+from contextlib import contextmanager
+from threading import local
 
 # ===== 설정 불러오기 =====
 try:
@@ -43,6 +46,98 @@ except ImportError:
     ROTATION_STEP = 60
     MAX_ROTATION_VARIANTS = 3
     print("설정 파일을 찾을 수 없어 기본 설정을 사용합니다.")
+
+
+class StructureLogger:
+    def __init__(self, name="simple_sumd", level=logging.INFO):#, log_file=None):
+        self.logger = logging.getLogger(name)
+        self.logger.setLevel(level)
+        
+        # 콘솔 핸들러
+        if not self.logger.handlers:
+            console_handler = logging.StreamHandler()
+            console_formatter = logging.Formatter(
+                '[%(asctime)s] %(levelname)s: %(message)s',
+                datefmt='%H:%M:%S'
+            )
+            console_handler.setFormatter(console_formatter)
+            self.logger.addHandler(console_handler)
+
+        # # 파일 핸들러 (필요시)
+        # if log_file:
+        #     file_handler = logging.FileHandler(log_file)
+        #     file_formatter = logging.Formatter(
+        #         '[%(asctime)s] %(levelname)s: %(message)s',
+        #         datefmt='%Y-%m-%d %H:%M:%S'
+        #     )
+        #     file_handler.setFormatter(file_formatter)
+        #     self.logger.addHandler(file_handler)
+        
+        # 스레드별 컨텍스트 저장
+        self._context = local()
+    
+    def set_context(self, **kwargs):
+        """로깅 컨텍스트 설정"""
+        if not hasattr(self._context, 'data'):
+            self._context.data = {}
+        self._context.data.update(kwargs)
+    
+    def clear_context(self):
+        """로깅 컨텍스트 초기화"""
+        self._context.data = {}
+    
+    def _format_message(self, message):
+        """컨텍스트 정보를 포함한 메시지 포맷팅"""
+        if not hasattr(self._context, 'data') or not self._context.data:
+            return message
+        
+        context_parts = []
+        data = self._context.data
+        
+        # 주요 컨텍스트 정보 순서대로 추가
+        if 'process_id' in data:
+            context_parts.append(f"P{data['process_id']}")
+        if 'gpu_id' in data:
+            context_parts.append(f"GPU{data['gpu_id']}")
+        if 'pdb_code' in data:
+            context_parts.append(f"{data['pdb_code']}")
+        if 'structure_name' in data:
+            context_parts.append(f"{data['structure_name']}")
+        if 'iteration' in data:
+            context_parts.append(f"I{data['iteration']}")
+        if 'attempt' in data:
+            context_parts.append(f"A{data['attempt']}")
+        
+        if context_parts:
+            context_str = "[" + "|".join(context_parts) + "]"
+            return f"{context_str} {message}"
+        
+        return message
+    
+    def debug(self, message):
+        self.logger.debug(self._format_message(message))
+    
+    def info(self, message):
+        self.logger.info(self._format_message(message))
+    
+    def warning(self, message):
+        self.logger.warning(self._format_message(message))
+    
+    def error(self, message):
+        self.logger.error(self._format_message(message))
+    
+    @contextmanager
+    def context(self, **kwargs):
+        """컨텍스트 매니저로 임시 컨텍스트 설정"""
+        original_context = getattr(self._context, 'data', {}).copy()
+        self.set_context(**kwargs)
+        try:
+            yield
+        finally:
+            self._context.data = original_context
+
+# 전역 로거 인스턴스
+logger = StructureLogger()
 
 def log(message):
     """간단한 로깅"""
@@ -710,6 +805,8 @@ def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_outpu
         
         if result.returncode != 0:
             log(f"Return code 오류 ({result.returncode}): {result.stderr}")
+            with open(os.path.join(cwd,"error.log"), mode="w") as stream:
+                stream.write(result.stderr)
             return False, result.returncode, result.stderr
         
         if expected_output:
@@ -1457,54 +1554,57 @@ def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, long_md
 
 def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, long_md=False):
     """단일 iteration 실행 - binding_site_residues 매개변수 추가됨"""
-    log(f"=== Iteration {iteration_num} 시작 {'(긴 MD)' if long_md else ''} ===")
+    with logger.context(iteration=iteration_num):
+        logger.info(f"Iteration 시작 {'(긴 MD)' if long_md else ''}")
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        result = run_attempt(work_dir, input_pdb, attempt, binding_site_residues, long_md)
-        
-        # JSON에 attempt 결과 저장
-        attempt_file = os.path.join(work_dir, f"iteration_{iteration_num}_attempt_{attempt}.json")
-        with open(attempt_file, "w") as f:
-            json.dump(result, f, indent=2, default=str)
-        
-        if result["success"]:
-            log(f"Iteration {iteration_num} 성공! (Attempt {attempt})")
-            return {
-                "iteration": iteration_num,
-                "success": True,
-                "attempts_used": attempt,
-                "final_result": result,
-                "long_md": long_md,
-                "close_contact_in_iteration": result.get("close_contact_detected", False)
-            }
-        else:
-            if result.get('stages') and result['stages'] and result['stages'][-1].get('stderr', 0):
-                log(f"Iteration {iteration_num} 실패: {attempt}번 시도에서 오류 실패")
-                return {
-                    "iteration": iteration_num,
-                    "success": False,
-                    "attempts_used": attempt,
-                    "final_result": result,
-                    "long_md": long_md,
-                    "close_contact_in_iteration": False,
-                    "last_stderr": result["stages"][-1]["stderr"],
-                    "failure_type": "gromacs_error"
-                }
-            else:
-                # 기울기 실패 등 다른 이유로 실패 - 다음 attempt 계속 시도
-                log(f"Iteration {iteration_num} Attempt {attempt} 실패 (기울기 조건 불만족 등) - 다음 attempt 시도")
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            with logger.context(attempt=attempt):
+                logger.info("Attempt 시작")
+                result = run_attempt(work_dir, input_pdb, attempt, binding_site_residues, long_md)
+            
+                # JSON에 attempt 결과 저장
+                attempt_file = os.path.join(work_dir, f"iteration_{iteration_num}_attempt_{attempt}.json")
+                with open(attempt_file, "w") as f:
+                    json.dump(result, f, indent=2, default=str)
+                
+                if result["success"]:
+                    logger.info("Iteration 성공!")
+                    return {
+                        "iteration": iteration_num,
+                        "success": True,
+                        "attempts_used": attempt,
+                        "final_result": result,
+                        "long_md": long_md,
+                        "close_contact_in_iteration": result.get("close_contact_detected", False)
+                    }
+                else:
+                    if result.get('stages') and result['stages'] and result['stages'][-1].get('stderr', 0):
+                        logger.error(f"GROMACS 오류로 실패")
+                        return {
+                            "iteration": iteration_num,
+                            "success": False,
+                            "attempts_used": attempt,
+                            "final_result": result,
+                            "long_md": long_md,
+                            "close_contact_in_iteration": False,
+                            "last_stderr": result["stages"][-1]["stderr"],
+                            "failure_type": "gromacs_error"
+                        }
+                    else:
+                        # 기울기 실패 등 다른 이유로 실패 - 다음 attempt 계속 시도
+                        logger.warning("기울기 조건 불만족 - 다음 attempt 시도")
 
-    
-    log(f"Iteration {iteration_num} 실패: {MAX_ATTEMPTS}번 시도 모두 실패")
-    return {
-        "iteration": iteration_num,
-        "success": False,
-        "attempts_used": MAX_ATTEMPTS,
-        "final_result": result,
-        "long_md": long_md,
-        "close_contact_in_iteration": False,
-        "failure_type": "max_attempts_exceeded"
-    }
+        
+        logger.error(f"Iteration 실패: {MAX_ATTEMPTS}번 시도 모두 실패")
+        return {
+            "iteration": iteration_num,
+            "success": False,
+            "attempts_used": MAX_ATTEMPTS,
+            "final_result": result,
+            "long_md": long_md,
+            "close_contact_in_iteration": False,
+            "failure_type": "max_attempts_exceeded"
+        }
 
 def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_queue, process_id):
     """GPU 할당된 단일 구조 시뮬레이션 실행 (배치 처리용)"""
@@ -1512,14 +1612,22 @@ def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_q
     
     # GPU 할당받기
     assigned_gpu = gpu_queue.get()
+
+    # 로깅 컨텍스트 설정
+    logger.set_context(
+        process_id=process_id,
+        gpu_id=assigned_gpu,
+        pdb_code=pdb_code,
+        structure_name=structure_name
+    )
     
     try:
-        log(f"[Process {process_id}] 구조 {structure_name} (PDB: {pdb_code}) GPU {assigned_gpu}에 할당됨")
+        logger.info("구조 시뮬레이션 시작")
         
         # 현재 프로세스의 GPU 환경 설정
         original_gpu_id = globals().get('GPU_ID', '0')
         globals()['GPU_ID'] = assigned_gpu
-        
+
         # 구조별 출력 디렉토리 생성
         struct_dir = os.path.join(output_dir, f"structure_{structure_name}")
         if os.path.exists(struct_dir):
@@ -1543,63 +1651,65 @@ def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_q
         
         while iteration < MAX_ITERATIONS:
             iteration += 1
-            
-            # iteration 디렉토리 생성
-            iter_dir = os.path.join(struct_dir, f'iteration_{iteration}')
-            if os.path.exists(iter_dir):
-                shutil.rmtree(iter_dir)
-            os.makedirs(iter_dir)
-            
-            if first_dir is None:
-                first_dir = os.path.join(iter_dir, 'attempt_1')
-            
-            # iteration 실행
-            iteration_result = run_iteration(iter_dir, current_pdb, iteration, binding_site_residues, need_long_md)
-            structure_results["iterations"].append(iteration_result)
-            
-            # iteration 결과 JSON 저장
-            iteration_file = os.path.join(struct_dir, f"iteration_{iteration}_summary.json")
-            with open(iteration_file, "w") as f:
-                json.dump(iteration_result, f, indent=2, default=str)
-            
-            if iteration_result["success"]:
-                # 다음 iteration용 PDB 업데이트
-                next_structure = os.path.join(iter_dir, "next_structure.pdb")
-                if ENABLE_CHAIN_RESTORATION:
-                    success = restore_original_chain_ids(next_structure, next_structure, first_dir)
-                    if success:
-                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 다음 구조 저장 완료 (체인 복원됨)")
-                    else:
-                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 체인 복원 실패, 변환된 구조 사용")
+            with logger.context(iteration=iteration):
+                logger.info(f"Iteration 시작")
+
+                # iteration 디렉토리 생성
+                iter_dir = os.path.join(struct_dir, f'iteration_{iteration}')
+                if os.path.exists(iter_dir):
+                    shutil.rmtree(iter_dir)
+                os.makedirs(iter_dir)
                 
-                if os.path.exists(next_structure):
-                    current_pdb = next_structure
+                if first_dir is None:
+                    first_dir = os.path.join(iter_dir, 'attempt_1')
                 
-                # 근접 접촉 검사
-                if ENABLE_LONG_MD and iteration_result.get("close_contact_in_iteration", False):
-                    if not need_long_md:
-                        need_long_md = True
-                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 근접 접촉 감지! 긴 MD 예정")
-                        continue
+                # iteration 실행
+                iteration_result = run_iteration(iter_dir, current_pdb, iteration, binding_site_residues, need_long_md)
+                structure_results["iterations"].append(iteration_result)
+                
+                # iteration 결과 JSON 저장
+                iteration_file = os.path.join(struct_dir, f"iteration_{iteration}_summary.json")
+                with open(iteration_file, "w") as f:
+                    json.dump(iteration_result, f, indent=2, default=str)
+                
+                if iteration_result["success"]:
+                    # 다음 iteration용 PDB 업데이트
+                    next_structure = os.path.join(iter_dir, "next_structure.pdb")
+                    if ENABLE_CHAIN_RESTORATION:
+                        success = restore_original_chain_ids(next_structure, next_structure, first_dir)
+                        if success:
+                            log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 다음 구조 저장 완료 (체인 복원됨)")
+                        else:
+                            log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 체인 복원 실패, 변환된 구조 사용")
+                    
+                    if os.path.exists(next_structure):
+                        current_pdb = next_structure
+                    
+                    # 근접 접촉 검사
+                    if ENABLE_LONG_MD and iteration_result.get("close_contact_in_iteration", False):
+                        if not need_long_md:
+                            need_long_md = True
+                            log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 근접 접촉 감지! 긴 MD 예정")
+                            continue
+                        else:
+                            log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 긴 MD 완료, 시뮬레이션 종료")
+                            break
                     else:
-                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): 긴 MD 완료, 시뮬레이션 종료")
-                        break
+                        need_long_md = False
                 else:
+                    failure_type = iteration_result.get("failure_type", "unknown")
+                    if failure_type == "gromacs_error":
+                        stderr = iteration_result.get("last_stderr", "Unknown GROMACS error")
+                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): GROMACS 에러로 인한 구조 포기")
+                        raise Exception(f"Gromacs error: {stderr}")
+                    elif failure_type == "max_attempts_exceeded":
+                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): Iteration {iteration} 최대 시도 횟수 초과 - 처음부터 재시작")
+                    else:
+                        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): Iteration {iteration} 실패 - 재시작")
+                    current_pdb = structure_pdb
+                    iteration = 0
                     need_long_md = False
-            else:
-                failure_type = iteration_result.get("failure_type", "unknown")
-                if failure_type == "gromacs_error":
-                    stderr = iteration_result.get("last_stderr", "Unknown GROMACS error")
-                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): GROMACS 에러로 인한 구조 포기")
-                    raise Exception(f"Gromacs error: {stderr}")
-                elif failure_type == "max_attempts_exceeded":
-                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): Iteration {iteration} 최대 시도 횟수 초과 - 처음부터 재시작")
-                else:
-                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): Iteration {iteration} 실패 - 재시작")
-                current_pdb = structure_pdb
-                iteration = 0
-                need_long_md = False
-                continue
+                    continue
         
         # 구조 시뮬레이션 완료
         structure_results["end_time"] = datetime.now().isoformat()
@@ -1626,13 +1736,13 @@ def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_q
         with open(structure_result_file, "w") as f:
             json.dump(structure_results, f, indent=2, default=str)
         
-        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}) (GPU {assigned_gpu}) 완료: {structure_results['successful_iterations']}/{structure_results['total_iterations']} 성공")
+        logger.info(f"시뮬레이션 완료: {structure_results['successful_iterations']}/{structure_results['total_iterations']} 성공")
         
         # 결과를 큐에 넣기
         results_queue.put(structure_results)
         
     except Exception as e:
-        log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}) (GPU {assigned_gpu}) 오류: {e}")
+        logger.error(f"시뮬레이션 중 오류: {e}")
         import traceback
         log(f"상세 오류: {traceback.format_exc()}")
         
@@ -1655,7 +1765,8 @@ def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_q
     finally:
         # GPU 반납
         gpu_queue.put(assigned_gpu)
-        log(f"[Process {process_id}] GPU {assigned_gpu} 반납됨")
+        logger.info("GPU 반납됨")
+        logger.clear_context()
 
 def run_unified_parallel_simulation(all_structure_info):
     """통합 병렬 시뮬레이션 실행 - 모든 PDB 파일의 모든 구조 처리"""
