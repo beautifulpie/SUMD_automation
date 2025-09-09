@@ -1366,19 +1366,9 @@ def create_next_iteration_structure(work_dir, output_pdb, long_md=False):
             log("protein 추출 실패")
             return False
         
-        # 원본 chain ID 복원 (긴 MD이거나 설정이 활성화된 경우)
-        if ENABLE_CHAIN_RESTORATION or long_md:
-            success = restore_original_chain_ids(temp_pdb, output_pdb, work_dir)
-            if success:
-                restoration_reason = "긴 MD" if long_md else "설정 활성화"
-                log(f"다음 iteration용 구조 생성 완료 (체인 복원됨 - {restoration_reason})")
-            else:
-                log("체인 복원 실패, GROMACS 결과 사용")
-                shutil.copy(temp_pdb, output_pdb)
-        else:
-            shutil.copy(temp_pdb, output_pdb)
-            log("다음 iteration용 구조 생성 완료 (체인 복원 비활성화)")
-        
+        shutil.copy(temp_pdb, output_pdb)
+        log("다음 iteration용 구조 복사 완료")
+    
         # 임시 파일 정리
         if os.path.exists(temp_pdb):
             os.remove(temp_pdb)
@@ -1600,7 +1590,7 @@ def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_q
                 failure_type = iteration_result.get("failure_type", "unknown")
                 if failure_type == "gromacs_error":
                     stderr = iteration_result.get("last_stderr", "Unknown GROMACS error")
-                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): GROMACS 에러로 인한 구조 포기 - {stderr}")
+                    log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): GROMACS 에러로 인한 구조 포기")
                     raise Exception(f"Gromacs error: {stderr}")
                 elif failure_type == "max_attempts_exceeded":
                     log(f"[Process {process_id}] 구조 {structure_name} ({pdb_code}): Iteration {iteration} 최대 시도 횟수 초과 - 처음부터 재시작")
