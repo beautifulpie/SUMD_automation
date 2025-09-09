@@ -15,6 +15,12 @@ from datetime import datetime
 from Bio.PDB import Structure, Model, Chain as PDBChain, Residue as PDBResidue, Atom
 from Bio.PDB.PDBParser import PDBParser
 from Bio.PDB.PDBIO import PDBIO,Select
+
+# ===== 예외 처리 데코레이터 =====
+from functools import wraps
+from enum import Enum
+
+# ===== 로깅 =====
 import logging
 from contextlib import contextmanager
 from threading import local
@@ -46,6 +52,122 @@ except ImportError:
     ROTATION_STEP = 60
     MAX_ROTATION_VARIANTS = 3
     print("설정 파일을 찾을 수 없어 기본 설정을 사용합니다.")
+
+
+class ErrorHandlingMode(Enum):
+    """예외 처리 모드"""
+    RETURN_FALSE = "return_false"      # False 반환
+    RETURN_NONE = "return_none"        # None 반환
+    RETURN_EMPTY_LIST = "return_list"  # [] 반환
+    RETURN_EMPTY_DICT = "return_dict"  # {} 반환
+    RERAISE = "reraise"                # 예외 재발생
+    RETURN_CUSTOM = "return_custom"    # 사용자 정의 값 반환
+
+def handle_exceptions(mode=ErrorHandlingMode.RETURN_FALSE, 
+                     return_value=None, 
+                     log_level="error",
+                     context_info=None,
+                     suppress_traceback=False):
+    """
+    예외 처리 데코레이터
+    
+    Args:
+        mode: 예외 처리 모드
+        return_value: RETURN_CUSTOM 모드일 때 반환할 값
+        log_level: 로그 레벨 (debug, info, warning, error)
+        context_info: 추가 컨텍스트 정보
+        suppress_traceback: 상세 traceback 출력 억제
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                # 컨텍스트 정보 구성
+                func_name = func.__name__
+                context_msg = f"{func_name}"
+                if context_info:
+                    context_msg += f" ({context_info})"
+                
+                # 로그 메시지 구성
+                error_msg = f"{context_msg} 실패: {e}"
+                
+                # 로그 레벨에 따른 출력
+                if log_level == "debug":
+                    logger.debug(error_msg)
+                elif log_level == "info":
+                    logger.info(error_msg)
+                elif log_level == "warning":
+                    logger.warning(error_msg)
+                else:  # error
+                    logger.error(error_msg)
+                
+                # 상세 traceback 출력 (필요시)
+                if not suppress_traceback:
+                    import traceback
+                    logger.debug(f"상세 오류: {traceback.format_exc()}")
+                
+                # 모드에 따른 반환값 결정
+                if mode == ErrorHandlingMode.RETURN_FALSE:
+                    return False
+                elif mode == ErrorHandlingMode.RETURN_NONE:
+                    return None
+                elif mode == ErrorHandlingMode.RETURN_EMPTY_LIST:
+                    return []
+                elif mode == ErrorHandlingMode.RETURN_EMPTY_DICT:
+                    return {}
+                elif mode == ErrorHandlingMode.RETURN_CUSTOM:
+                    return return_value
+                elif mode == ErrorHandlingMode.RERAISE:
+                    raise
+                else:
+                    return False
+        
+        return wrapper
+    return decorator
+
+def handle_file_operations(context_info=None):
+    """파일 작업용 예외 처리 데코레이터"""
+    return handle_exceptions(
+        mode=ErrorHandlingMode.RETURN_FALSE,
+        context_info=context_info,
+        suppress_traceback=True
+    )
+
+def handle_analysis_operations(context_info=None):
+    """분석 작업용 예외 처리 데코레이터 (빈 리스트/None 반환)"""
+    return handle_exceptions(
+        mode=ErrorHandlingMode.RETURN_NONE,
+        context_info=context_info,
+        suppress_traceback=True
+    )
+
+def handle_gromacs_operations(context_info=None):
+    """GROMACS 작업용 예외 처리 데코레이터"""
+    return handle_exceptions(
+        mode=ErrorHandlingMode.RETURN_FALSE,
+        context_info=context_info,
+        log_level="error"
+    )
+
+def handle_structure_operations(default_return=None, context_info=None):
+    """구조 처리용 예외 처리 데코레이터"""
+    return handle_exceptions(
+        mode=ErrorHandlingMode.RETURN_CUSTOM,
+        return_value=default_return,
+        context_info=context_info,
+        suppress_traceback=True
+    )
+
+def handle_distance_calculations(default_distance=float('inf')):
+    """거리 계산용 예외 처리 데코레이터"""
+    return handle_exceptions(
+        mode=ErrorHandlingMode.RETURN_CUSTOM,
+        return_value=default_distance,
+        context_info="거리 계산",
+        suppress_traceback=True
+    )
 
 
 class StructureLogger:
@@ -155,92 +277,82 @@ def parse_gpu_ids(gpu_id_string):
         log(f"GPU ID 파싱 실패: {e}")
         return ["0"]  # 기본값
 
+@handle_file_operations("타겟 체인 추출")
 def extract_target_chains_pdb(input_pdb, output_pdb, chain1, chain2):
     """타겟 체인만 추출하여 새로운 PDB 생성"""
-    try:
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("complex", input_pdb)
-        
-        if structure is None:
-            log(f"PDB 구조가 None: {input_pdb}")
-            return False
-        
-        # 새로운 구조 생성
-        new_structure = Structure.Structure("target")
-        new_model = Model.Model(0)
-        new_structure.add(new_model)
-        
-        # 타겟 체인들만 복사
-        for model in structure:
-            for chain in model:
-                if chain.id in [chain1, chain2]:
-                    new_chain = PDBChain.Chain(chain.id)
-                    for residue in chain:
-                        new_residue = PDBResidue.Residue(residue.id, residue.resname, residue.segid)
-                        for atom in residue:
-                            new_atom = Atom.Atom(atom.name, atom.coord, atom.bfactor, 
-                                           atom.occupancy, atom.altloc, atom.fullname, 
-                                           atom.serial_number, atom.element)
-                            new_residue.add(new_atom)
-                        new_chain.add(new_residue)
-                    new_model.add(new_chain)
-        
-        # 저장
-        io = PDBIO()
-        io.set_structure(new_structure)
-        io.save(output_pdb)
-        
-        log(f"타겟 체인 추출 완료: {output_pdb} (체인: {chain1}, {chain2})")
-        return True
-        
-    except Exception as e:
-        log(f"타겟 체인 추출 실패: {e}")
-        return False
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("complex", input_pdb)
+    
+    if structure is None:
+        raise ValueError(f"PDB 구조가 None: {input_pdb}")
+    
+    # 새로운 구조 생성
+    new_structure = Structure.Structure("target")
+    new_model = Model.Model(0)
+    new_structure.add(new_model)
+    
+    # 타겟 체인들만 복사
+    for model in structure:
+        for chain in model:
+            if chain.id in [chain1, chain2]:
+                new_chain = PDBChain.Chain(chain.id)
+                for residue in chain:
+                    new_residue = PDBResidue.Residue(residue.id, residue.resname, residue.segid)
+                    for atom in residue:
+                        new_atom = Atom.Atom(atom.name, atom.coord, atom.bfactor, 
+                                        atom.occupancy, atom.altloc, atom.fullname, 
+                                        atom.serial_number, atom.element)
+                        new_residue.add(new_atom)
+                    new_chain.add(new_residue)
+                new_model.add(new_chain)
+    
+    # 저장
+    io = PDBIO()
+    io.set_structure(new_structure)
+    io.save(output_pdb)
+    
+    logger.info(f"타겟 체인 추출 완료: {output_pdb} (체인: {chain1}, {chain2})")
+    return True
 
+@handle_structure_operations(default_return=(None, None), context_info="체인 간 분리축 계산")
 def calculate_separation_axis(pdb_file, chain1, chain2):
     """두 체인 간의 분리 축 계산"""
-    try:
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("structure", pdb_file)
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("structure", pdb_file)
+    
+    chain_centers = {}
+    
+    for model in structure:
+        for chain in model:
+            if chain.id in [chain1, chain2]:
+                atoms = []
+                elements = []
+                for residue in chain:
+                    for atom in residue:
+                        atoms.append(atom.coord)
+                        elements.append(atom.element)
+                
+                if atoms:
+                    center = calculate_mass_weighted_center(atoms, elements)
+                    if center is not None:
+                        chain_centers[chain.id] = center
+    
+    if len(chain_centers) == 2:
+        # 순서를 명시적으로 지정
+        receptor_center = chain_centers[chain1]  # receptor
+        ligand_center = chain_centers[chain2]    # ligand
         
-        chain_centers = {}
+        # receptor에서 ligand로 향하는 벡터 (멀어지는 방향)
+        separation_vector = ligand_center - receptor_center
+        separation_vector = separation_vector / np.linalg.norm(separation_vector)
         
-        for model in structure:
-            for chain in model:
-                if chain.id in [chain1, chain2]:
-                    atoms = []
-                    elements = []
-                    for residue in chain:
-                        for atom in residue:
-                            atoms.append(atom.coord)
-                            elements.append(atom.element)
-                    
-                    if atoms:
-                        center = calculate_mass_weighted_center(atoms, elements)
-                        if center is not None:
-                            chain_centers[chain.id] = center
+        logger.debug(f"Receptor center: {receptor_center}")
+        logger.debug(f"Ligand center: {ligand_center}")
+        logger.debug(f"분리 방향 (receptor→ligand): {separation_vector}")
         
-        if len(chain_centers) == 2:
-            # 순서를 명시적으로 지정
-            receptor_center = chain_centers[chain1]  # receptor
-            ligand_center = chain_centers[chain2]    # ligand
-            
-            # receptor에서 ligand로 향하는 벡터 (멀어지는 방향)
-            separation_vector = ligand_center - receptor_center
-            separation_vector = separation_vector / np.linalg.norm(separation_vector)
-            
-            log(f"Receptor center: {receptor_center}")
-            log(f"Ligand center: {ligand_center}")
-            log(f"분리 방향 (receptor→ligand): {separation_vector}")
-            
-            return separation_vector, chain_centers
-        
-        log("체인 중심 계산 실패")
-        return None, None
-        
-    except Exception as e:
-        log(f"분리 축 계산 오류: {e}")
-        return None, None
+        return separation_vector, chain_centers
+    
+    raise ValueError("체인 중심 계산 실패")
 
 def generate_multi_direction_vectors(base_vector):
     """원뿔형 벡터 생성 - ROTATION_STEP 설정에 따라 분할 각도 조절"""
@@ -297,35 +409,32 @@ def generate_multi_direction_vectors(base_vector):
     
     return vectors
 
+@handle_file_operations("구조 이격 적용")
 def apply_structure_separation(input_pdb, output_pdb, separation_vector, distance, chain_to_move):
     """구조에 이격 적용"""
-    try:
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("structure", input_pdb)
-        
-        # 이동할 거리 벡터 계산 (Angstrom -> Angstrom)
-        move_vector = separation_vector * distance
-        
-        log(f"체인 {chain_to_move}를 {distance:.1f}Å 이동: {move_vector}")
-        
-        for model in structure:
-            for chain in model:
-                if chain.id == chain_to_move:
-                    for residue in chain:
-                        for atom in residue:
-                            atom.coord = atom.coord + move_vector
-        
-        # 수정된 구조 저장
-        io = PDBIO()
-        io.set_structure(structure)
-        io.save(output_pdb)
-        
-        log(f"이격된 구조 저장: {output_pdb}")
-        return True
-        
-    except Exception as e:
-        log(f"구조 이격 적용 실패: {e}")
-        return False
+
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("structure", input_pdb)
+    
+    # 이동할 거리 벡터 계산 (Angstrom -> Angstrom)
+    move_vector = separation_vector * distance
+    
+    logger.debug(f"체인 {chain_to_move}를 {distance:.1f}Å 이동: {move_vector}")
+    
+    for model in structure:
+        for chain in model:
+            if chain.id == chain_to_move:
+                for residue in chain:
+                    for atom in residue:
+                        atom.coord = atom.coord + move_vector
+    
+    # 수정된 구조 저장
+    io = PDBIO()
+    io.set_structure(structure)
+    io.save(output_pdb)
+    
+    logger.info(f"이격된 구조 저장: {output_pdb}")
+    return True
 
 def create_rotation_matrix(axis, angle_degrees):
     """축 기준 회전 행렬 생성 (Rodrigues' rotation formula)"""
@@ -398,66 +507,62 @@ def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
     variants = [base_pdb]  # 원본 포함
     
     if not ENABLE_ROTATIONAL_VARIANTS:
-        log(f"회전 변형 비활성화됨 (ENABLE_ROTATIONAL_VARIANTS = False)")
+        logger.info("회전 변형 비활성화됨 (ENABLE_ROTATIONAL_VARIANTS = False)")
         return variants
     
-    log(f"회전 변형 생성 시작: {base_name} (최대 {MAX_ROTATION_VARIANTS}개)")
+    logger.info(f"회전 변형 생성 시작: {base_name} (최대 {MAX_ROTATION_VARIANTS}개)")
     
-    try:
-        # 구조의 중심점 계산
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("structure", base_pdb)
-        
-        all_coords = []
-        for model in structure:
-            for chain in model:
-                if chain.id==chain_to_move:
-                    for residue in chain:
-                        for atom in residue:
-                            all_coords.append(atom.coord)
-        
-        if not all_coords:
-            log(f"회전 변형 실패: 원자 좌표를 찾을 수 없음")
-            return variants
-        
-        center_point = np.mean(all_coords, axis=0)
-        log(f"구조 중심점: {center_point}")
-        
-        # 회전 축들 (X, Y, Z)
-        rotation_axes = [
-            np.array([1, 0, 0]),  # X축
-            np.array([0, 1, 0]),  # Y축  
-            np.array([0, 0, 1])   # Z축
-        ]
-        
-        variant_count = 1
-        for axis in rotation_axes:
-            if variant_count >= MAX_ROTATION_VARIANTS:
-                log(f"최대 회전 변형 수 도달: {MAX_ROTATION_VARIANTS}")
-                break
-                
-            angle = STRUCTURE_ROTATION
-            log(f"회전 변형 {variant_count}: 축{axis}, 각도{angle}도")
+    
+    # 구조의 중심점 계산
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("structure", base_pdb)
+    
+    all_coords = []
+    for model in structure:
+        for chain in model:
+            if chain.id==chain_to_move:
+                for residue in chain:
+                    for atom in residue:
+                        all_coords.append(atom.coord)
+    
+    if not all_coords:
+        logger.warning("원자 좌표를 찾을 수 없음 - 원본 구조만 반환")
+        return variants  # 예외 발생 대신 지금까지의 variants 반환
+    
+    center_point = np.mean(all_coords, axis=0)
+    logger.debug(f"구조 중심점: {center_point}")
+    
+    # 회전 축들 (X, Y, Z)
+    rotation_axes = [
+        np.array([1, 0, 0]),  # X축
+        np.array([0, 1, 0]),  # Y축  
+        np.array([0, 0, 1])   # Z축
+    ]
+    
+    variant_count = 1
+    for axis in rotation_axes:
+        if variant_count >= MAX_ROTATION_VARIANTS:
+            logger.info(f"최대 회전 변형 수 도달: {MAX_ROTATION_VARIANTS}")
+            break
             
-            rotation_matrix = create_rotation_matrix(axis, angle)
-            
-            variant_pdb = os.path.join(output_dir, f"{base_name}_rot{variant_count}.pdb")
-            
+        angle = STRUCTURE_ROTATION
+        logger.debug(f"회전 변형 {variant_count}: 축{axis}, 각도{angle}도")
+        
+        rotation_matrix = create_rotation_matrix(axis, angle)
+        
+        variant_pdb = os.path.join(output_dir, f"{base_name}_rot{variant_count}.pdb")
+        try:        
             if apply_rotational_transform(base_pdb, variant_pdb, rotation_matrix, center_point, chain_to_move):
                 variants.append(variant_pdb)
                 variant_count += 1
-                log(f"✓ 회전 변형 생성 성공: {os.path.basename(variant_pdb)}")
+                logger.info(f"✓ 회전 변형 생성 성공: {os.path.basename(variant_pdb)}")
             else:
-                log(f"✗ 회전 변형 생성 실패: {os.path.basename(variant_pdb)}")
-        
-        log(f"회전 변형 완료: 원본 1개 + 회전 {variant_count-1}개 = 총 {len(variants)}개")
-        return variants
-        
-    except Exception as e:
-        log(f"회전 변형 생성 중 오류: {e}")
-        import traceback
-        log(f"상세 오류: {traceback.format_exc()}")
-        return variants
+                logger.warning(f"✗ 회전 변형 생성 실패: {os.path.basename(variant_pdb)}")
+        except Exception as e:
+            logger.warning(f"회전 변형 {variant_count} 생성 중 오류: {e}")
+
+    logger.info(f"회전 변형 완료: 원본 1개 + 회전 {variant_count-1}개 = 총 {len(variants)}개")
+    return variants
 
 def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
     """초기 구조 풀 생성 - 구조 리스트 반환"""
@@ -466,7 +571,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
     if not ENABLE_MULTI_DIRECTION_SEPARATION:
         # 기본 모드: 원본 구조만 사용
         structure_pool = [input_pdb]
-        log("기본 모드: 원본 구조만 사용")
+        logger.info("기본 모드: 원본 구조만 사용")
         return structure_pool
     
     try:
@@ -491,17 +596,17 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
 
         # 더 작은 체인 결정
         chain_to_move = chain1 if chain_sizes.get(chain1, 0) <= chain_sizes.get(chain2, 0) else chain2
-        log(f"이동할 체인: {chain_to_move} (크기: {chain_sizes.get(chain_to_move, 0)} 원자)")
+        logger.info(f"이동할 체인: {chain_to_move} (크기: {chain_sizes.get(chain_to_move, 0)} 원자)")
         chain_to_stay = chain1 if chain_sizes.get(chain1, 0) >= chain_sizes.get(chain2, 0) else chain2
-        log(f"고정될 체인: {chain_to_stay} (크기: {chain_sizes.get(chain_to_stay, 0)} 원자)")
+        logger.info(f"고정될 체인: {chain_to_stay} (크기: {chain_sizes.get(chain_to_stay, 0)} 원자)")
+    
         
         # 1단계: 분리 축 계산
         separation_vector, chain_centers = calculate_separation_axis(input_pdb, chain_to_stay, chain_to_move)
         if separation_vector is None:
-            log("분리 축 계산 실패 - 원본 구조 사용")
-            structure_pool = [input_pdb]
-            return structure_pool
-        # log(f"{separation_vector}")
+            logger.warning("분리 축 계산 실패 - 원본 구조 사용")
+            return [input_pdb]
+        
         # 2단계: 다방향 벡터 생성 (원뿔형)
         direction_vectors = generate_multi_direction_vectors(separation_vector)
         
@@ -521,7 +626,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
             variants = generate_structure_variants(base_struct, pool_dir, f"sep{i}", chain_to_move)
             structure_pool.extend(variants)
         
-        log(f"구조 풀 생성 완료: 이 {len(structure_pool)}개 구조")
+        logger.info(f"구조 풀 생성 완료: 이 {len(structure_pool)}개 구조")
         
         # 구조 풀 정보 저장
         pool_info = {
@@ -537,81 +642,75 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
         return structure_pool
         
     except Exception as e:
-        log(f"구조 풀 생성 실패: {e}")
+        logger.error(f"구조 풀 생성 실패: {e}")
         structure_pool = [input_pdb]
         return structure_pool
 
+@handle_structure_operations(default_return=(None, None),context_info="Ligand/Receptor 식별")
 def identify_ligand_receptor(input_pdb):
     """복합체에서 ligand와 receptor 판별 (크기 기준)"""
-    try:
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("complex", input_pdb)
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("complex", input_pdb)
 
-        if structure is None:
-            log(f"PDB 구조가 None: {input_pdb}")
-            raise
+    if structure is None:
+        raise ValueError(f"PDB 구조가 None: {input_pdb}")
 
-        chain_sizes = {}
-        for model in structure:
-            for chain in model:
-                atom_count = len(list(chain.get_atoms()))
-                chain_sizes[chain.id] = atom_count
-        
-        # 크기순 정렬
-        sorted_chains = sorted(chain_sizes.items(), key=lambda x: x[1])
-        ligand_chain = sorted_chains[0][0]  # 가장 작은 chain
-        receptor_chain = sorted_chains[-1][0]  # 가장 큰 chain
-        
-        log(f"Ligand (작은 분자): Chain {ligand_chain} ({chain_sizes[ligand_chain]} atoms)")
-        log(f"Receptor (큰 분자): Chain {receptor_chain} ({chain_sizes[receptor_chain]} atoms)")
-        
-        return ligand_chain, receptor_chain
-    except Exception as e:
-        log(f"체인 판별 실패: {e}")
-        return None, None
+    chain_sizes = {}
+    for model in structure:
+        for chain in model:
+            atom_count = len(list(chain.get_atoms()))
+            chain_sizes[chain.id] = atom_count
+    
+    # 크기순 정렬
+    sorted_chains = sorted(chain_sizes.items(), key=lambda x: x[1])
+    ligand_chain = sorted_chains[0][0]  # 가장 작은 chain
+    receptor_chain = sorted_chains[-1][0]  # 가장 큰 chain
+    
+    logger.info(f"Ligand (작은 분자): Chain {ligand_chain} ({chain_sizes[ligand_chain]} atoms)")
+    logger.info(f"Receptor (큰 분자): Chain {receptor_chain} ({chain_sizes[receptor_chain]} atoms)")
+    
+    
+    return ligand_chain, receptor_chain
 
+@handle_analysis_operations("Binding site 정의")
 def define_binding_site(input_pdb, ligand_chain, receptor_chain, distance_cutoff=4.0):
     """Binding site 정의 (<4Å 거리 기준)"""
-    try:
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("complex", input_pdb)
-
-        if structure is None:
-            log(f"PDB 구조가 None: {input_pdb}")
-            raise
-
-        ligand_atoms = []
-        receptor_residues = set()
-        
-        for model in structure:
-            for chain in model:
-                if chain.id == ligand_chain:
-                    ligand_atoms = [atom for atom in chain.get_atoms()]
-        
-        for model in structure:
-            for chain in model:
-                if chain.id == receptor_chain:
-                    for residue in chain:
-                        for atom in residue:
-                            # ligand의 모든 원자와 거리 계산
-                            for lig_atom in ligand_atoms:
-                                distance = np.linalg.norm(atom.coord - lig_atom.coord)
-                                # log(f"{lig_atom.coord}, {atom.coord}, {distance}")
-                                if distance < distance_cutoff:
-                                    residue_id = residue.get_id()
-                                    full_id = f"{residue_id[1]}{residue_id[2].strip()}"
-                                    receptor_residues.add(full_id)
-                                    break
-        
-        binding_site_residues = list(receptor_residues)
-        log(f"Binding site residues: {binding_site_residues}")
-        
-        return binding_site_residues
-    except Exception as e:
-        log(f"Binding site 정의 실패: {e}")
-        return None
     
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("complex", input_pdb)
 
+    if structure is None:
+        raise ValueError(f"PDB 구조가 None: {input_pdb}")
+
+    ligand_atoms = []
+    receptor_residues = set()
+    
+    for model in structure:
+        for chain in model:
+            if chain.id == ligand_chain:
+                ligand_atoms = [atom for atom in chain.get_atoms()]
+    
+    for model in structure:
+        for chain in model:
+            if chain.id == receptor_chain:
+                for residue in chain:
+                    for atom in residue:
+                        # ligand의 모든 원자와 거리 계산
+                        for lig_atom in ligand_atoms:
+                            distance = np.linalg.norm(atom.coord - lig_atom.coord)
+                            # log(f"{lig_atom.coord}, {atom.coord}, {distance}")
+                            if distance < distance_cutoff:
+                                residue_id = residue.get_id()
+                                full_id = f"{residue_id[1]}{residue_id[2].strip()}"
+                                receptor_residues.add(full_id)
+                                break
+    
+    binding_site_residues = list(receptor_residues)
+    logger.info(f"Binding site residues: {binding_site_residues}")
+    
+    return binding_site_residues
+    
+@handle_structure_operations(default_return=(None,None,None), context_info="PDB 파일명 파싱")
 def parse_pdb_filename(pdb_file_path):
     """PDB 파일명에서 정보 추출"""
     filename = os.path.basename(pdb_file_path)
@@ -1101,39 +1200,36 @@ pbc = xyz
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
+@handle_structure_operations(default_return=[], context_info="궤적에서 거리 추출")
 def extract_distances_from_trajectory(tpr_file, xtc_file, binding_site_residues, work_dir):
     """궤적에서 거리 추출"""
-    try:
-        cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {xtc_file} -o trajectory.pdb -sep"
-        if not run_command_with_output_check(cmd, work_dir, expected_output="trajectory0.pdb"):
-            log("궤적 변환 실패")
-            return []
+    cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {xtc_file} -o trajectory.pdb -sep"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="trajectory0.pdb")
+    if not success:
+        raise RuntimeError("궤적 변환 실패")
+    
+    distances = []
+    frame_num = 0
+    
+    while True:
+        frame_pdb = os.path.join(work_dir, f"trajectory{frame_num}.pdb")
+        if not os.path.exists(frame_pdb):
+            break
         
-        distances = []
-        frame_num = 0
+        if os.path.getsize(frame_pdb) == 0:
+            log(f"빈 프레임 파일: trajectory{frame_num}.pdb")
+            break
         
-        while True:
-            frame_pdb = os.path.join(work_dir, f"trajectory{frame_num}.pdb")
-            if not os.path.exists(frame_pdb):
-                break
-            
-            if os.path.getsize(frame_pdb) == 0:
-                log(f"빈 프레임 파일: trajectory{frame_num}.pdb")
-                break
-            
-            distance = calculate_distance_binding_site(frame_pdb, binding_site_residues)
-            if distance != float('inf'):
-                distances.append(distance)
-            
-            os.remove(frame_pdb)
-            frame_num += 1
+        distance = calculate_distance_binding_site(frame_pdb, binding_site_residues)
+        if distance != float('inf'):
+            distances.append(distance)
         
-        log(f"이 {len(distances)}개 프레임에서 거리 추출")
-        return distances
-        
-    except Exception as e:
-        log(f"궤적 분석 오류: {e}")
-        return []
+        os.remove(frame_pdb)
+        frame_num += 1
+    
+    logger.info(f"이 {len(distances)}개 프레임에서 거리 추출")
+    return distances
+
 
 def calculate_slope(distances):
     """기울기 계산"""
@@ -1281,25 +1377,20 @@ pbc = xyz
     return stages
 
 # ===== 체인 복원 함수들 =====
-
+@handle_structure_operations(default_return=[], context_info="원본 체인 순서 추출")
 def get_original_chain_order(input_pdb):
     """원본 PDB 파일에서 체인 순서 추출"""
-    try:
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("structure", input_pdb)
-        
-        chain_order = []
-        for model in structure:
-            for chain in model:
-                if chain.id not in chain_order:
-                    chain_order.append(chain.id)
-        
-        log(f"원본 체인 순서: {chain_order}")
-        return chain_order
-        
-    except Exception as e:
-        log(f"원본 체인 순서 추출 실패: {e}")
-        return []
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("structure", input_pdb)
+    
+    chain_order = []
+    for model in structure:
+        for chain in model:
+            if chain.id not in chain_order:
+                chain_order.append(chain.id)
+    
+    log(f"원본 체인 순서: {chain_order}")
+    return chain_order
 
 def extract_chain_id_from_filename(filename):
     """파일명에서 체인 ID 추출"""
@@ -1307,100 +1398,92 @@ def extract_chain_id_from_filename(filename):
     match = re.search(r'topol_Protein_chain_([A-Z])\.itp', os.path.basename(filename))
     return match.group(1) if match else None
 
+@handle_structure_operations(default_return=0, context_info="토폴로지 파일에서 원자 수 카운트")
 def count_atoms_in_topology(topology_file):
     """토폴로지 파일에서 원자 수 카운트"""
-    try:
-        atom_count = 0
-        in_atoms_section = False
-        
-        with open(topology_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                
-                # [ atoms ] 섹션 시작
-                if line == "[ atoms ]":
-                    in_atoms_section = True
-                    continue
-                
-                # 다른 섹션 시작하면 atoms 섹션 종료
-                if line.startswith("[") and in_atoms_section:
-                    break
-                
-                # atoms 섹션 내에서 원자 라인 카운트
-                if in_atoms_section and line and not line.startswith(";"):
-                    parts = line.split()
-                    if len(parts) >= 5:  # 최소한의 원자 정보가 있는 라인
-                        atom_count += 1
-        
-        return atom_count
-        
-    except Exception as e:
-        log(f"토폴로지 파일 읽기 실패 {topology_file}: {e}")
-        return 0
+    atom_count = 0
+    in_atoms_section = False
+    
+    with open(topology_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            
+            # [ atoms ] 섹션 시작
+            if line == "[ atoms ]":
+                in_atoms_section = True
+                continue
+            
+            # 다른 섹션 시작하면 atoms 섹션 종료
+            if line.startswith("[") and in_atoms_section:
+                break
+            
+            # atoms 섹션 내에서 원자 라인 카운트
+            if in_atoms_section and line and not line.startswith(";"):
+                parts = line.split()
+                if len(parts) >= 5:  # 최소한의 원자 정보가 있는 라인
+                    atom_count += 1
+    
+    return atom_count
 
+@handle_structure_operations(default_return=False, context_info="원자 범위 기반 체인 할당 - 원본 체인 순서 유지")
 def assign_chains_by_atom_ranges(input_pdb, output_pdb, chain_atom_counts, original_chain_order):
     """원자 범위 기반 체인 할당 - 원본 체인 순서 유지"""
-    try:
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("structure", input_pdb)
-        if structure is None:
-            log(f"PDB 구조가 None: {input_pdb}")
-            raise
-        
-        
-        # 원본 순서에 있는 체인들만 필터링
-        sorted_chains = [chain_id for chain_id in original_chain_order 
-                        if chain_id in chain_atom_counts]
-        # 혹시 빠진 체인이 있으면 추가
-        missing_chains = [chain_id for chain_id in chain_atom_counts.keys() 
-                        if chain_id not in sorted_chains]
-        sorted_chains.extend(sorted(missing_chains))
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("structure", input_pdb)
+    if structure is None:
+        logger.warning(f"PDB 구조가 None: {input_pdb}")
+        raise
     
-        
-        log(f"사용할 체인 순서: {sorted_chains}")
-        
-        # 각 체인의 시작/끝 원자 인덱스 계산
-        chain_ranges = {}
-        current_start = 1
-        
-        for chain_id in sorted_chains:
-            atom_count = chain_atom_counts[chain_id]
-            chain_ranges[chain_id] = (current_start, current_start + atom_count - 1)
-            current_start += atom_count
-        
-        log(f"체인별 원자 범위: {chain_ranges}")
-        
-        # PDB 구조에서 원자 할당
-        atom_index = 0
-        
-        for model in structure:
-            for chain in model:
-                chain_atoms = list(chain.get_atoms())
+    
+    # 원본 순서에 있는 체인들만 필터링
+    sorted_chains = [chain_id for chain_id in original_chain_order 
+                    if chain_id in chain_atom_counts]
+    # 혹시 빠진 체인이 있으면 추가
+    missing_chains = [chain_id for chain_id in chain_atom_counts.keys() 
+                    if chain_id not in sorted_chains]
+    sorted_chains.extend(sorted(missing_chains))
+
+    
+    logger.debug(f"사용할 체인 순서: {sorted_chains}")
+    
+    # 각 체인의 시작/끝 원자 인덱스 계산
+    chain_ranges = {}
+    current_start = 1
+    
+    for chain_id in sorted_chains:
+        atom_count = chain_atom_counts[chain_id]
+        chain_ranges[chain_id] = (current_start, current_start + atom_count - 1)
+        current_start += atom_count
+    
+    logger.debug(f"체인별 원자 범위: {chain_ranges}")
+    
+    # PDB 구조에서 원자 할당
+    atom_index = 0
+    
+    for model in structure:
+        for chain in model:
+            chain_atoms = list(chain.get_atoms())
+            
+            for atom in chain_atoms:
+                atom_index += 1
                 
-                for atom in chain_atoms:
-                    atom_index += 1
-                    
-                    # 현재 원자가 속할 체인 찾기
-                    for target_chain_id, (start_idx, end_idx) in chain_ranges.items():
-                        if start_idx <= atom_index <= end_idx:
-                            chain.id = target_chain_id
-                            break
-                    else:
-                        # 범위를 벗어나면 마지막 체인에 할당
-                        chain.id = sorted_chains[-1] if sorted_chains else 'A'
-                        log(f"경고: 원자 {atom_index}가 범위를 벗어남, 체인 {chain.id}에 할당")
-        
-        # 수정된 구조 저장
-        io = PDBIO()
-        io.set_structure(structure)
-        io.save(output_pdb)
-        
-        log(f"토폴로지 기반 체인 복원 완료: {sorted_chains}")
-        return True
-        
-    except Exception as e:
-        log(f"체인 할당 실패: {e}")
-        return False
+                # 현재 원자가 속할 체인 찾기
+                for target_chain_id, (start_idx, end_idx) in chain_ranges.items():
+                    if start_idx <= atom_index <= end_idx:
+                        chain.id = target_chain_id
+                        break
+                else:
+                    # 범위를 벗어나면 마지막 체인에 할당
+                    chain.id = sorted_chains[-1] if sorted_chains else 'A'
+                    logger.warning(f"경고: 원자 {atom_index}가 범위를 벗어남, 체인 {chain.id}에 할당")
+    
+    # 수정된 구조 저장
+    io = PDBIO()
+    io.set_structure(structure)
+    io.save(output_pdb)
+    
+    logger.info(f"토폴로지 기반 체인 복원 완료: {sorted_chains}")
+    return True
 
 def restore_chain_info_from_topology(work_dir, converted_pdb, output_pdb, original_chain_order):
     """토폴로지 파일 기반 체인 정보 복원 (원본 순서 유지)"""
@@ -1455,61 +1538,48 @@ def restore_chain_info_from_topology(work_dir, converted_pdb, output_pdb, origin
         except:
             pass
         return False
-
+    
 def restore_original_chain_ids(gromacs_pdb, output_pdb, work_dir):
     """토폴로지 기반 체인 복원 (원본 순서 유지)"""
     
-    try:
-        # 원본 체인 순서 추출
-        original_chain_order = None
-        original_pdb=os.path.join(work_dir, "input.pdb")
-        original_chain_order = get_original_chain_order(original_pdb)
-        
-        # 토폴로지 파일 기반 복원 시도
-        success = restore_chain_info_from_topology(work_dir, gromacs_pdb, output_pdb, original_chain_order)
-        
-        if success:
-            log("토폴로지 기반 체인 복원 성공")
-            return True
-        else:
-            raise
-        
-    except Exception as e:
-        log(f"체인 복원 실패: {e}")
-        import traceback
-        log(f"상세 오류: {traceback.format_exc()}")
-        try:
-            shutil.copy(gromacs_pdb, output_pdb)
-        except:
-            pass
+    # 원본 체인 순서 추출
+    original_chain_order = None
+    original_pdb=os.path.join(work_dir, "input.pdb")
+    original_chain_order = get_original_chain_order(original_pdb)
+    
+    # 토폴로지 파일 기반 복원 시도
+    success = restore_chain_info_from_topology(work_dir, gromacs_pdb, output_pdb, original_chain_order)
+    
+    if success:
+        logger.info("토폴로지 기반 체인 복원 성공")
+        return True
+    else:
         return False
 
+@handle_gromacs_operations("다음 iteration 구조 생성")
 def create_next_iteration_structure(work_dir, output_pdb, long_md=False):
     """다음 iteration을 위한 구조 생성 (protein group 선택, 체인 정보 보존)"""
-    try:
-        tpr_file = os.path.join(work_dir, "md.tpr")
-        gro_file = os.path.join(work_dir, "md.gro")
-        
-        # GROMACS로 protein만 추출
-        temp_pdb = os.path.join(work_dir, "protein_only.pdb")
-        cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {gro_file} -o {temp_pdb}"
-        
-        if not run_command_with_output_check(cmd, work_dir, expected_output="protein_only.pdb"):
-            log("protein 추출 실패")
-            return False
-        
-        shutil.copy(temp_pdb, output_pdb)
-        log("다음 iteration용 구조 복사 완료")
+    tpr_file = os.path.join(work_dir, "md.tpr")
+    gro_file = os.path.join(work_dir, "md.gro")
     
-        # 임시 파일 정리
-        if os.path.exists(temp_pdb):
-            os.remove(temp_pdb)
+    # GROMACS로 protein만 추출
+    temp_pdb = os.path.join(work_dir, "protein_only.pdb")
+    cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {gro_file} -o {temp_pdb}"
+    
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="protein_only.pdb")
+
+    if not success:
+        raise RuntimeError("protein 추출 실패")
+    
+    shutil.copy(temp_pdb, output_pdb)
+    logger.info("다음 iteration용 구조 복사 완료")
+
+    # 임시 파일 정리
+    if os.path.exists(temp_pdb):
+        os.remove(temp_pdb)
+    
+    return True
         
-        return True
-        
-    except Exception as e:
-        log(f"다음 iteration용 구조 생성 실패: {e}")
-        return False
 
 # ===== 시뮬레이션 실행 함수들 =====
 
