@@ -1,8 +1,8 @@
 # Simple SuMD 설정 파일 (체인 복원 기능 포함)
 
 # ===== 시뮬레이션 기본 설정 =====
-MAX_ITERATIONS = 2          # 최대 iteration 수 default 100
-MAX_ATTEMPTS = 10           # iteration당 최대 attempt 수 default 100
+MAX_ITERATIONS = 100          # 최대 iteration 수 default 100
+MAX_ATTEMPTS = 100           # iteration당 최대 attempt 수 default 100
 SIMULATION_TIME_NS = 0.3     # MD 시뮬레이션 시간 (ns) - 300ps default 0.3
 ENABLE_CHAIN_RESTORATION = False # default False
 SAVE_TOP_N=5                # default 5
