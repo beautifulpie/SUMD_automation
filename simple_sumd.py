@@ -530,9 +530,10 @@ def apply_rotational_transform(input_pdb, output_pdb, rotation_matrix, center_po
 
 def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
     """기본 구조에서 회전 변형들 생성"""
-    variants = []  # 원본 포함
+    variants = []  #[base_pdb] 원본 포함
     
     if not ENABLE_ROTATIONAL_VARIANTS:
+        variants.extend(base_pdb)
         logger.info("회전 변형 비활성화됨 (ENABLE_ROTATIONAL_VARIANTS = False)")
         return variants
     
@@ -556,16 +557,18 @@ def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
         return variants  # 예외 발생 대신 지금까지의 variants 반환
     
     center_point = np.mean(all_coords, axis=0)
-    logger.debug(f"구조 중심점: {center_point}")
+    logger.info(f"구조 중심점: {center_point}")
     
-    # 회전 축들 (X, Y, Z)
     rotation_axes = [
         np.array([1, 0, 0]),  # X축
         np.array([0, 1, 0]),  # Y축  
         np.array([0, 0, 1])   # Z축
     ]
 
-    rotations=np.random.choice(rotation_axes, size=MAX_ROTATION_VARIANTS, replace=True)
+    # 인덱스를 랜덤으로 선택
+    indices = np.random.choice(len(rotation_axes), size=MAX_ROTATION_VARIANTS, replace=True)
+    rotations = [rotation_axes[i] for i in indices]
+    logger.debug(f"회전 축: {rotations}")
     
     variant_count = 0
     for axis in rotations:
