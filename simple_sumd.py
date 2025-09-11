@@ -530,7 +530,7 @@ def apply_rotational_transform(input_pdb, output_pdb, rotation_matrix, center_po
 
 def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
     """기본 구조에서 회전 변형들 생성"""
-    variants = [base_pdb]  # 원본 포함
+    variants = []  # 원본 포함
     
     if not ENABLE_ROTATIONAL_VARIANTS:
         logger.info("회전 변형 비활성화됨 (ENABLE_ROTATIONAL_VARIANTS = False)")
@@ -564,14 +564,16 @@ def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
         np.array([0, 1, 0]),  # Y축  
         np.array([0, 0, 1])   # Z축
     ]
+
+    rotations=np.random.choice(rotation_axes, size=MAX_ROTATION_VARIANTS, replace=True)
     
-    variant_count = 1
-    for axis in rotation_axes:
+    variant_count = 0
+    for axis in rotations:
         if variant_count >= MAX_ROTATION_VARIANTS:
             logger.info(f"최대 회전 변형 수 도달: {MAX_ROTATION_VARIANTS}")
             break
             
-        angle = STRUCTURE_ROTATION
+        angle = np.random.randint(STRUCTURE_ROTATION)
         logger.debug(f"회전 변형 {variant_count}: 축{axis}, 각도{angle}도")
         
         rotation_matrix = create_rotation_matrix(axis, angle)
@@ -589,7 +591,7 @@ def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
         except Exception as e:
             logger.warning(f"회전 변형 {variant_count} 생성 중 오류: {e}")
 
-    logger.info(f"회전 변형 완료: 원본 1개 + 회전 {variant_count-1}개 = 총 {len(variants)}개")
+    logger.info(f"회전 변형 완료: 회전 {variant_count-1}개 = 총 {len(variants)}개")
     return variants
 
 def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
