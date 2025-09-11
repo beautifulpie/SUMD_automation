@@ -1,8 +1,8 @@
 # Simple SuMD 설정 파일 (체인 복원 기능 포함)
 
 # ===== 시뮬레이션 기본 설정 =====
-MAX_ITERATIONS = 2          # 최대 iteration 수
-MAX_ATTEMPTS = 10           # iteration당 최대 attempt 수
+MAX_ITERATIONS = 99999999          # 최대 iteration 수
+MAX_ATTEMPTS = 100           # iteration당 최대 attempt 수
 SIMULATION_TIME_NS = 0.3     # MD 시뮬레이션 시간 (ns) - 300ps
 ENABLE_CHAIN_RESTORATION = True
 
@@ -20,15 +20,15 @@ BINDING_SITE_RESIDUES = []       # 수동으로 지정된 binding site (빈 리�
 # ===== 구조 이격 설정 =====
 ENABLE_MULTI_DIRECTION_SEPARATION = True  # 다방향 이격 활성화
 SEPARATION_DISTANCE = 30.0                # 이격 거리 (Angstrom)
-CONE_ANGLES = [60,120]                           # 기준 벡터에서 기울기 [] 배열 입력.
+CONE_ANGLES = [30,60]                           # 기준 벡터에서 기울기 [] 배열 입력.
 ENABLE_RANDOM_DIRECTION=True # 다방향 이격 랜덤 활성화
 ROTATION_STEP = 1                  # 이격 평면 회전 각도 (degrees) ENABLE_RANDOM_DIRECTION False 시 활용
 MAX_SEPARATION_VARIANTS=1           # 구조 이격 최대 수 (con_angle당) + 1(기준이격구조) = 최종 구조 수. ENABLE_RANDOM_DIRECTION True 시 활용
 
 # ===== 회전 변형 설정 =====
 ENABLE_ROTATIONAL_VARIANTS = True  # 회전 변형 활성화
-MAX_ROTATION_VARIANTS = 2           # 최대 회전 변형 수
-STRUCTURE_ROTATION = 60
+MAX_ROTATION_VARIANTS = 1           # 최대 회전 변형 수
+STRUCTURE_ROTATION = 120     # 랜덤 최대 각도
 
 # ===== GROMACS 설정 =====
 GPU_ID = "1"                 #  사용할 GPU ID
