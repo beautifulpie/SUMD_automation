@@ -1683,7 +1683,7 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, lon
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             with logger.context(attempt=attempt):
-                logger.info("Attempt 시작")
+                # logger.info("Attempt 시작")
                 result = run_attempt(work_dir, input_pdb, attempt, binding_site_residues, long_md)
             
                 # JSON에 attempt 결과 저장
@@ -1761,10 +1761,10 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
                 current_pdb = prepare_next_iteration_structure(next_structure, first_dir)
                 
                 # 근접 접촉 검사 및 긴 MD 결정
-                need_long_md = handle_close_contact_detection(iteration_result, need_long_md)
-                if need_long_md and iteration_result.get("close_contact_in_iteration", False):
+                if need_long_md:
                     logger.info("긴 MD 완료, 시뮬레이션 종료")
                     break
+                need_long_md = handle_close_contact_detection(iteration_result, need_long_md)
             else:
                 # 실패 처리 및 재시작 결정
                 if should_restart_simulation(iteration_result):
@@ -1796,9 +1796,7 @@ def handle_close_contact_detection(iteration_result, current_need_long_md):
     if iteration_result.get("close_contact_in_iteration", False):
         if not current_need_long_md:
             logger.info("근접 접촉 감지! 긴 MD 예정")
-            return True
-        else:
-            return True  # 이미 긴 MD 모드
+        return True  # long MD return
     
     return False
 
