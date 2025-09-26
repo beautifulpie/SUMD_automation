@@ -19,7 +19,7 @@ BINDING_SITE_RESIDUES = []       # 수동으로 지정된 binding site (빈 리�
 
 # ===== 구조 이격 설정 =====
 ENABLE_MULTI_DIRECTION_SEPARATION = True  # 다방향 이격 활성화
-SEPARATION_DISTANCE = 30.0                # 이격 거리 (Angstrom)
+SEPARATION_DISTANCE = 50.0                # 이격 거리 (Angstrom)
 CONE_ANGLES = [30,60]                           # 기준 벡터에서 기울기 [] 배열 입력.
 ENABLE_RANDOM_DIRECTION=True # 다방향 이격 랜덤 활성화
 ROTATION_STEP = 1                  # 이격 평면 회전 각도 (degrees) ENABLE_RANDOM_DIRECTION False 시 활용
@@ -88,19 +88,18 @@ MDP_SETTINGS = {
         "pressure": 1.0
     },
     "long_md": {
-        "integrator": "sd",
+        "integrator": "md",
         "dt": 0.002,
         "temperature": 300,
-        "pressure": 1.0,
-        "output_frequency_multiplier": 10  # 긴 MD에서는 출력 빈도 증가
+        "pressure": 1.0
     }
 }
 
 # ===== 출력 빈도 설정 =====
 OUTPUT_FREQUENCY = {
-    "energy": 5000,
-    "log": 5000, 
-    "trajectory": 5000
+    "energy": 50,
+    "log": 50, 
+    "trajectory": 50
 }
 
 # ===== 시스템 크기별 권장 설정 =====

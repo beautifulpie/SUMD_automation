@@ -368,21 +368,22 @@ def calculate_separation_axis(pdb_file, chain1, chain2):
         receptor_center = chain_centers[chain1]  # receptor
         ligand_center = chain_centers[chain2]    # ligand
         
-        # receptor에서 ligand로 향하는 벡터 (멀어지는 방향)
-        separation_vector = ligand_center - receptor_center
-        separation_vector = separation_vector / np.linalg.norm(separation_vector)
+        # ligand에서 receptor로 향하는 벡터 (가까워지는 방향)
+        l2r_vector = receptor_center - ligand_center
+        l2r_vector = l2r_vector / np.linalg.norm(l2r_vector)
         
         logger.debug(f"Receptor center: {receptor_center}")
         logger.debug(f"Ligand center: {ligand_center}")
-        logger.debug(f"분리 방향 (receptor→ligand): {separation_vector}")
+        logger.debug(f"분리 방향 (ligand→receptor): {l2r_vector}")
         
-        return separation_vector, chain_centers
+        return l2r_vector, chain_centers
     
     raise ValueError("체인 중심 계산 실패")
 
-def generate_multi_direction_vectors(base_vector):
+def generate_multi_direction_vectors(vector):
     """원뿔형 벡터 생성 - ROTATION_STEP 설정에 따라 분할 각도 조절"""
     vectors = []
+    base_vector=-vector
     
     # 1. 기준 벡터 (방향 30Å)
     vectors.append(base_vector)
@@ -436,14 +437,14 @@ def generate_multi_direction_vectors(base_vector):
     return vectors
 
 @handle_file_operations("구조 이격 적용")
-def apply_structure_separation(input_pdb, output_pdb, separation_vector, distance, chain_to_move):
+def apply_structure_separation(input_pdb, output_pdb, separation_vector, distance, chain_to_move, l2r_vector):
     """구조에 이격 적용"""
 
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("structure", input_pdb)
     
     # 이동할 거리 벡터 계산 (Angstrom -> Angstrom)
-    move_vector = separation_vector * distance
+    move_vector = separation_vector * distance+l2r_vector
     
     logger.debug(f"체인 {chain_to_move}를 {distance:.1f}Å 이동: {move_vector}")
     
@@ -632,14 +633,14 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
         logger.info(f"고정될 체인: {chain_to_stay} (크기: {chain_sizes.get(chain_to_stay, 0)} 원자)")
     
         
-        # 1단계: 분리 축 계산
-        separation_vector, chain_centers = calculate_separation_axis(input_pdb, chain_to_stay, chain_to_move)
-        if separation_vector is None:
+        # 1단계:  축 계산, 
+        l2r_vector, chain_centers = calculate_separation_axis(input_pdb, chain_to_stay, chain_to_move)
+        if l2r_vector is None:
             logger.warning("분리 축 계산 실패 - 원본 구조 사용")
             return [input_pdb]
         
         # 2단계: 다방향 벡터 생성 (원뿔형)
-        direction_vectors = generate_multi_direction_vectors(separation_vector)
+        direction_vectors = generate_multi_direction_vectors(l2r_vector)
         
         # 3단계: 각 방향으로 이격된 구조 생성
         base_structures = []
@@ -648,7 +649,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
             separated_pdb = os.path.join(pool_dir, format_filename('variant_separation', num=i))
             
             if apply_structure_separation(input_pdb, separated_pdb, direction, 
-                                        SEPARATION_DISTANCE, chain_to_move):
+                                        SEPARATION_DISTANCE, chain_to_move, l2r_vector):
                 base_structures.append(separated_pdb)
                 log(f"이격 구조 {i} 생성: {separated_pdb}")
         
@@ -1673,7 +1674,7 @@ def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, long_md
         "final_distance": distances[-1],
         "min_distance": min_distance,
         "long_md_executed": long_md,
-        "close_contact_detected": min_distance <= CLOSE_DISTANCE_THRESHOLD
+        "close_contact_detected": distances[-1] <= CLOSE_DISTANCE_THRESHOLD
     }
 
 def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, long_md=False):
