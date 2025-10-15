@@ -1731,7 +1731,7 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, lon
             "close_contact_in_iteration": False,
             "failure_type": "max_attempts_exceeded"
         }
-def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues, structure_results):
+def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues, structure_results, original_pdb):
     """구조의 모든 iteration 실행"""
     iteration = 0
     need_long_md = False
@@ -1770,7 +1770,7 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
             else:
                 # 실패 처리 및 재시작 결정
                 if should_restart_simulation(iteration_result):
-                    current_pdb = structure_pdb  # 원점으로 돌아가기
+                    current_pdb = original_pdb  # 원점으로 돌아가기
                     iteration = 0
                     need_long_md = False
                     continue
@@ -1864,7 +1864,7 @@ def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_q
         structure_results = initialize_structure_results(pdb_code, structure_name, structure_pdb, assigned_gpu, process_id)
         
         # 모든 iteration 실행
-        first_dir = execute_structure_iterations(structure_pdb, struct_dir, binding_site_residues, structure_results)
+        first_dir = execute_structure_iterations(structure_pdb, struct_dir, binding_site_residues, structure_results, structure_pdb)
         
         # 결과 마무리
         finalize_structure_results(structure_results, struct_dir, first_dir)
