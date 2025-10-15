@@ -1132,6 +1132,7 @@ nstxout-compressed = {output_freq["trajectory"]//10}
 continuation = yes
 constraints = h-bonds
 constraint_algorithm = lincs
+refcoord_scaling = com
 cutoff-scheme = Verlet
 ns_type = grid
 nstlist = 10
