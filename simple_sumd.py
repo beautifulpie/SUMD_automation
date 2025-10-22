@@ -949,114 +949,507 @@ def calculate_distance_binding_site(pdb_file, binding_site_residues):
 
 # ===== GROMACS 관련 함수들 =====
 
-def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_output=None, timeout=3600):
-    """명령어 실행 및 목적 파일 생성 확인"""
-    try:
-        log(f"실행: {cmd}")
-        result = subprocess.run(
-            cmd, shell=True, cwd=cwd, 
-            input=input_text.encode() if input_text else None,
-            capture_output=True, text=True, timeout=timeout
-        )
-        
-        if result.returncode != 0:
-            log(f"Return code 오류 ({result.returncode}): {result.stderr}")
-            with open(os.path.join(cwd,"error.log"), mode="w") as stream:
-                stream.write(result.stderr)
-            return False, result.returncode, result.stderr
-        
-        if expected_output:
-            if isinstance(expected_output, str):
-                expected_output = [expected_output]
-            
-            for output_file in expected_output:
-                full_path = os.path.join(cwd, output_file) if cwd else output_file
-                if not os.path.exists(full_path):
-                    log(f"목적 파일 생성 실패: {output_file}")
-                    return False, result.returncode, f"목적 파일 생성 실패: {output_file}"
-                elif os.path.getsize(full_path) == 0:
-                    log(f"빈 파일 생성: {output_file}")
-                    return False, result.returncode, f"빈 파일 생성: {output_file}"
-        
-        return True, result.returncode, "Success"
-    except subprocess.TimeoutExpired:
-        log(f"명령어 실행 시간 초과: {cmd}")
-        return False, 1, f"명령어 실행 시간 초과: {cmd}"
-    except Exception as e:
-        log(f"명령어 실행 실패: {e}")
-        return False, 1, f"명령어 실행 실패: {e}"
+def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_output=None, timeout=3600, max_retries=0, enable_cpi_recovery=False):
+    """
+    명령어 실행 및 목적 파일 생성 확인 (checkpoint 복구 기능 포함)
     
-def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_output=[], timeout=3600, max_retries=2, is_long_md=False):
-    """GROMACS mdrun을 checkpoint 복구 기능과 함께 실행"""
+    Args:
+        cmd: 실행할 명령어
+        cwd: 작업 디렉토리
+        input_text: 표준 입력으로 전달할 텍스트
+        expected_output: 생성되어야 할 파일 (str 또는 list)
+        timeout: 타임아웃 시간 (초)
+        max_retries: 최대 재시도 횟수
+        enable_cpi_recovery: True이면 mdrun -cpi를 통한 자동 재시작
+    
+    Returns:
+        tuple: (success: bool, returncode: int, stderr: str)
+    """
     attempt = 0
     
     while attempt <= max_retries:
         try:
-            if attempt == 0:
-                # 첫 번째 시도 - 일반 실행
-                log(f"MD 실행 시도 {attempt + 1}/{max_retries + 1}")
-                result = subprocess.run(
-                    cmd, shell=True, cwd=cwd, 
-                    input=input_text.encode() if input_text else None,
-                    capture_output=True, text=True, timeout=timeout
-                )
-            else:
-                # 재시작 시도 - checkpoint 파일 확인
-                checkpoint_files = []
-                for output_file in expected_output:
-                    base_name = output_file.replace('.gro', '').replace('.xtc', '')
-                    checkpoint_file = os.path.join(cwd, f"{base_name}.cpt")
-                    if os.path.exists(checkpoint_file):
-                        checkpoint_files.append(checkpoint_file)
-                
-                if not checkpoint_files:
-                    log(f"재시작 시도 {attempt}: checkpoint 파일을 찾을 수 없음")
-                    break
-                
-                # checkpoint에서 재시작하는 명령어 구성
-                restart_cmd = cmd + " -cpi"
-                log(f"MD 재시작 시도 {attempt + 1}/{max_retries + 1} (checkpoint에서)")
-                log(f"재시작 명령어: {restart_cmd}")
-                
-                result = subprocess.run(
-                    restart_cmd, shell=True, cwd=cwd,
-                    capture_output=True, text=True, timeout=timeout
-                )
+            current_cmd = cmd
             
-            # 실행 결과 확인
-            if result.returncode == 0:
-                # 출력 파일 존재 확인
+            # 재시도 시 -cpi가 활성화되어 있고 mdrun 명령어면 자동 추가
+            if attempt > 0 and enable_cpi_recovery and 'mdrun' in cmd and '-cpi' not in cmd:
+                current_cmd = cmd + " -cpi"
+                log(f"재시작 시도 {attempt + 1}/{max_retries + 1}: checkpoint 자동 복구 모드")
+            elif attempt > 0:
+                log(f"재시도 {attempt + 1}/{max_retries + 1}")
+            else:
+                log(f"실행: {current_cmd}")
+            
+            result = subprocess.run(
+                current_cmd, shell=True, cwd=cwd, 
+                input=input_text.encode() if input_text else None,
+                capture_output=True, text=True, timeout=timeout
+            )
+            
+            if result.returncode != 0:
+                log(f"Return code 오류 ({result.returncode}): {result.stderr}")
+                if cwd:
+                    with open(os.path.join(cwd, "error.log"), mode="w") as stream:
+                        stream.write(result.stderr)
+                
+                # 재시도가 남아있으면 계속
+                if attempt < max_retries:
+                    attempt += 1
+                    time.sleep(5)
+                    continue
+                else:
+                    return False, result.returncode, result.stderr
+            
+            # 출력 파일 확인
+            if expected_output:
+                if isinstance(expected_output, str):
+                    expected_output = [expected_output]
+                
                 all_files_exist = True
                 for output_file in expected_output:
-                    full_path = os.path.join(cwd, output_file)
-                    if not os.path.exists(full_path) or os.path.getsize(full_path) == 0:
+                    full_path = os.path.join(cwd, output_file) if cwd else output_file
+                    if not os.path.exists(full_path):
+                        log(f"목적 파일 생성 실패: {output_file}")
+                        all_files_exist = False
+                        break
+                    elif os.path.getsize(full_path) == 0:
+                        log(f"빈 파일 생성: {output_file}")
                         all_files_exist = False
                         break
                 
-                if all_files_exist:
-                    log(f"MD 실행 성공 (시도 {attempt + 1})")
-                    return True, result.returncode, result.stderr
-                else:
-                    log(f"MD 실행 후 출력 파일 확인 실패 (시도 {attempt + 1})")
-            else:
-                log(f"MD 실행 실패 (시도 {attempt + 1}): Return code {result.returncode}")
-                log(f"Error: {result.stderr}")
+                if not all_files_exist:
+                    # 재시도가 남아있으면 계속
+                    if attempt < max_retries:
+                        attempt += 1
+                        time.sleep(5)
+                        continue
+                    else:
+                        return False, result.returncode, "목적 파일 생성 실패"
+            
+            # 성공
+            if attempt > 0:
+                log(f"실행 성공 (시도 {attempt + 1}회)")
+            return True, result.returncode, "Success"
             
         except subprocess.TimeoutExpired:
-            log(f"MD 실행 시간 초과 (시도 {attempt + 1}/{max_retries + 1})")
-            if is_long_md:
-                log(f"Long MD 시간 초과 - 다음 시도에서 checkpoint 복구 시도")
+            log(f"명령어 실행 시간 초과 (시도 {attempt + 1}/{max_retries + 1})")
+            
+            # checkpoint 복구 모드이고 재시도가 남아있으면 계속
+            if enable_cpi_recovery and attempt < max_retries:
+                # checkpoint 파일 확인
+                if cwd and expected_output:
+                    checkpoint_exists = False
+                    for output_file in expected_output:
+                        base_name = output_file.replace('.gro', '').replace('.xtc', '')
+                        checkpoint_file = os.path.join(cwd, f"{base_name}.cpt")
+                        if os.path.exists(checkpoint_file):
+                            checkpoint_exists = True
+                            log(f"Checkpoint 파일 발견: {os.path.basename(checkpoint_file)}")
+                            break
+                    
+                    if checkpoint_exists:
+                        attempt += 1
+                        time.sleep(5)
+                        continue
+                    else:
+                        log("Checkpoint 파일이 없어 재시작 불가")
+                        return False, 1, "타임아웃 및 checkpoint 없음"
+            
+            return False, 1, f"명령어 실행 시간 초과: {cmd}"
+            
         except Exception as e:
-            log(f"MD 실행 중 예외 발생 (시도 {attempt + 1}): {e}")
-        
-        attempt += 1
-        
-        if attempt <= max_retries:
-            log(f"다음 시도까지 5초 대기...")
-            time.sleep(5)
+            log(f"명령어 실행 실패: {e}")
+            if attempt < max_retries:
+                attempt += 1
+                time.sleep(5)
+                continue
+            else:
+                return False, 1, f"명령어 실행 실패: {e}"
     
-    log(f"MD 실행 최종 실패: {max_retries + 1}회 시도 모두 실패")
-    return False, result.returncode, result.stderr
+    return False, 1, "최대 재시도 횟수 초과"
+
+def initialize_system_once(work_dir, input_pdb):
+    """
+    시스템 초기 평형화 - iteration 1에서 한 번만 수행
+    
+    Args:
+        work_dir: 작업 디렉토리
+        input_pdb: 입력 PDB 파일
+        
+    Returns:
+        tuple: (equilibrated.gro, equilibrated.cpt, topol.top) 경로
+        
+    Raises:
+        RuntimeError: 평형화 단계 실패 시
+    """
+    logger.info("=== 시스템 초기화 및 평형화 시작 ===")
+    
+    # 입력 PDB 복사
+    input_pdb_copy = os.path.join(work_dir, "input.pdb")
+    shutil.copy(input_pdb, input_pdb_copy)
+    logger.info(f"입력 PDB 복사: {os.path.basename(input_pdb)}")
+    
+    # 1. pdb2gmx
+    logger.info("1/8: pdb2gmx 실행")
+    cmd = f"echo '1\\n1' | gmx pdb2gmx -f input.pdb -o complex.gro -p topol.top \
+          -water {WATER_MODEL} -ff {FORCE_FIELD} -ignh"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output=["complex.gro", "topol.top"]
+    )
+    if not success:
+        raise RuntimeError(f"pdb2gmx 실패: {stderr}")
+    
+    # 2. editconf
+    logger.info("2/8: editconf 실행")
+    cmd = f"gmx editconf -f complex.gro -o box.gro -c -d {BOX_DISTANCE} -bt cubic"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output="box.gro"
+    )
+    if not success:
+        raise RuntimeError(f"editconf 실패: {stderr}")
+    
+    # 3. solvate
+    logger.info("3/8: solvate 실행")
+    cmd = "gmx solvate -cp box.gro -cs spc216.gro -o solv.gro -p topol.top"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output="solv.gro"
+    )
+    if not success:
+        raise RuntimeError(f"solvate 실패: {stderr}")
+    
+    # 4. ions grompp
+    logger.info("4/8: ions grompp 실행")
+    with open(os.path.join(work_dir, "ions.mdp"), "w") as f:
+        f.write("""integrator = steep
+emtol = 1000.0
+emstep = 0.01
+nsteps = 50000
+nstlist = 1
+cutoff-scheme = Verlet
+ns_type = grid
+coulombtype = cutoff
+rcoulomb = 1.0
+rvdw = 1.0
+pbc = xyz
+""")
+    cmd = f"gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output="ions.tpr"
+    )
+    if not success:
+        raise RuntimeError(f"ions grompp 실패: {stderr}")
+    
+    # 5. genion
+    logger.info("5/8: genion 실행")
+    cmd = "echo 'SOL' | gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output="solv_ions.gro"
+    )
+    if not success:
+        raise RuntimeError(f"genion 실패: {stderr}")
+    
+    # MDP 파일들 생성
+    create_mdp_files(work_dir, long_md=False)
+    
+    # 6. EM (Energy Minimization)
+    logger.info("6/8: 에너지 최소화 (EM) 실행")
+    cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output="em.tpr"
+    )
+    if not success:
+        raise RuntimeError(f"EM grompp 실패: {stderr}")
+    
+    cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm em -ntomp {NTOMP} \
+          -nb gpu -gpu_id {GPU_ID}"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output=["em.gro", "em.edr"], timeout=TIMEOUT_GROMACS
+    )
+    if not success:
+        raise RuntimeError(f"EM mdrun 실패: {stderr}")
+    
+    # 7. NVT (Temperature equilibration)
+    logger.info("7/8: NVT 평형화 실행")
+    cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output="nvt.tpr"
+    )
+    if not success:
+        raise RuntimeError(f"NVT grompp 실패: {stderr}")
+    
+    cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} \
+          -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"], timeout=TIMEOUT_GROMACS
+    )
+    if not success:
+        raise RuntimeError(f"NVT mdrun 실패: {stderr}")
+    
+    # 8. NPT (Pressure equilibration)
+    logger.info("8/8: NPT 평형화 실행")
+    cmd = f"gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output="npt.tpr"
+    )
+    if not success:
+        raise RuntimeError(f"NPT grompp 실패: {stderr}")
+    
+    cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt -ntomp {NTOMP} \
+          -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+    success, returncode, stderr = run_command_with_output_check(
+        cmd, work_dir, expected_output=["npt.gro", "npt.cpt"], timeout=TIMEOUT_GROMACS
+    )
+    if not success:
+        raise RuntimeError(f"NPT mdrun 실패: {stderr}")
+    
+    # 평형화 결과 파일들 복사
+    equilibrated_gro = os.path.join(work_dir, "equilibrated.gro")
+    equilibrated_cpt = os.path.join(work_dir, "equilibrated.cpt")
+    topology = os.path.join(work_dir, "topol.top")
+    
+    shutil.copy(os.path.join(work_dir, "npt.gro"), equilibrated_gro)
+    shutil.copy(os.path.join(work_dir, "npt.cpt"), equilibrated_cpt)
+    
+    logger.info("=== 평형화 완료 ===")
+    logger.info(f"평형화 결과: equilibrated.gro, equilibrated.cpt")
+    
+    return equilibrated_gro, equilibrated_cpt, topology
+def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_site_residues, long_md=False):
+    """
+    체크포인트에서 이어서 SUMD MD 수행 (연속된 시간)
+    """
+    md_label = "긴 MD" if long_md else "SUMD"
+    logger.info(f"=== {md_label} 사이클 {cycle_num} 시작 ===")
+    
+    result = {
+        'success': False,
+        'gro': None,
+        'cpt': None,
+        'xtc': None,
+        'distances': [],
+        'slope': None,
+        'error': None
+    }
+    
+    try:
+        # MDP 파일 생성
+        create_mdp_files(work_dir, long_md=long_md)
+        
+        # 이전 체크포인트 복사
+        local_prev_gro = os.path.join(work_dir, "prev.gro")
+        local_prev_cpt = os.path.join(work_dir, "prev.cpt")
+        local_topology = os.path.join(work_dir, "topol.top")
+        
+        shutil.copy(prev_gro, local_prev_gro)
+        shutil.copy(prev_cpt, local_prev_cpt)
+        shutil.copy(topology, local_topology)
+        
+        logger.info(f"체크포인트 로드: {os.path.basename(prev_gro)}, {os.path.basename(prev_cpt)}")
+        
+        # 1. grompp
+        logger.info(f"1/2: MD grompp 실행")
+        cmd = f"gmx grompp -f md.mdp -c prev.gro -t prev.cpt -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
+        success, returncode, stderr = run_command_with_output_check(
+            cmd, work_dir, expected_output="md.tpr"
+        )
+        if not success:
+            result['error'] = f"MD grompp 실패: {stderr}"
+            logger.error(result['error'])
+            return result
+        
+        # 2. mdrun - 연속 시간으로 실행
+        logger.info(f"2/2: {md_label} 실행 (연속 시간)")
+        timeout = TIMEOUT_LONG_MD if long_md else TIMEOUT_GROMACS
+        max_retries = 2 if long_md else 0
+        
+        # 항상 -cpi 사용하여 연속된 시간으로 실행
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md -cpi prev.cpt -ntomp {NTOMP} \
+              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+        
+        success, returncode, stderr = run_command_with_output_check(
+            cmd, 
+            cwd=work_dir, 
+            expected_output=["md.gro", "md.xtc"], 
+            timeout=timeout,
+            max_retries=max_retries,
+            enable_cpi_recovery=long_md  # Long MD만 자동 복구 활성화
+        )
+        
+        if not success:
+            result['error'] = f"{md_label} mdrun 실패: {stderr}"
+            logger.error(result['error'])
+            return result
+        
+        # 3. 거리 측정
+        logger.info("거리 측정 중...")
+        tpr_file = os.path.join(work_dir, "md.tpr")
+        xtc_file = os.path.join(work_dir, "md.xtc")
+        
+        distances = extract_distances_from_trajectory(
+            tpr_file, xtc_file, binding_site_residues, work_dir
+        )
+        
+        if not distances or len(distances) < 2:
+            result['error'] = "거리 데이터 부족"
+            logger.error(result['error'])
+            return result
+        
+        # 4. 기울기 계산
+        slope = calculate_slope(distances)
+        min_distance = min(distances)
+        
+        logger.info(f"거리 측정 완료: {len(distances)}개 프레임")
+        logger.info(f"초기 거리: {distances[0]:.2f}Å")
+        logger.info(f"최종 거리: {distances[-1]:.2f}Å")
+        logger.info(f"최소 거리: {min_distance:.2f}Å")
+        logger.info(f"기울기: {slope:.6f}")
+        
+        # 5. 결과 구성
+        result['success'] = True
+        result['gro'] = os.path.join(work_dir, "md.gro")
+        result['cpt'] = os.path.join(work_dir, "md.cpt")
+        result['xtc'] = os.path.join(work_dir, "md.xtc")
+        result['distances'] = distances
+        result['slope'] = slope
+        result['initial_distance'] = distances[0]
+        result['final_distance'] = distances[-1]
+        result['min_distance'] = min_distance
+        
+        logger.info(f"=== {md_label} 사이클 {cycle_num} 완료 ===")
+        
+        return result
+        
+    except Exception as e:
+        result['error'] = f"예상치 못한 오류: {str(e)}"
+        logger.error(result['error'])
+        import traceback
+        logger.debug(f"상세 오류: {traceback.format_exc()}")
+        return result
+    
+def save_last_failed_attempt(work_dir, failed_stage, error_info, attempt_num):
+    """
+    마지막 실패한 attempt의 전체 파일 저장 (GROMACS 오류만)
+    
+    Args:
+        work_dir: 현재 작업 디렉토리
+        failed_stage: 실패한 단계명 (e.g., "em", "nvt", "md")
+        error_info: 에러 정보 dict {
+            'returncode': int,
+            'stderr': str,
+            'stdout': str (optional)
+        }
+        attempt_num: attempt 번호
+        
+    Returns:
+        str: 저장된 디렉토리 경로
+    """
+    # iteration 디렉토리 (work_dir의 부모)
+    iter_dir = os.path.dirname(work_dir) if "attempt" in work_dir else work_dir
+    last_failed_dir = os.path.join(iter_dir, "last_failed_attempt")
+    
+    logger.info(f"마지막 실패 attempt 저장: {failed_stage} 단계")
+    
+    # 기존 디렉토리 삭제 (이전 실패 덮어쓰기)
+    if os.path.exists(last_failed_dir):
+        shutil.rmtree(last_failed_dir)
+    os.makedirs(last_failed_dir)
+    
+    # 1. 실패 단계 기록
+    with open(os.path.join(last_failed_dir, "failed_stage.txt"), "w") as f:
+        f.write(f"Failed Stage: {failed_stage}\n")
+        f.write(f"Attempt Number: {attempt_num}\n")
+        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+    
+    # 2. 전체 에러 로그 저장
+    with open(os.path.join(last_failed_dir, "full_error.log"), "w") as f:
+        f.write("=== STDERR ===\n")
+        f.write(error_info.get('stderr', 'No stderr available'))
+        f.write("\n\n")
+        if 'stdout' in error_info:
+            f.write("=== STDOUT ===\n")
+            f.write(error_info['stdout'])
+        f.write("\n\n")
+        f.write(f"Return Code: {error_info.get('returncode', 'unknown')}\n")
+    
+    # 3. 모든 관련 파일 복사
+    files_to_save = {
+        # 입력 파일
+        'input.pdb': '입력 PDB',
+        'topol.top': '토폴로지',
+        '*.itp': '토폴로지 include',
+        
+        # MDP 파일들
+        '*.mdp': 'MDP 설정',
+        
+        # 중간 단계 결과
+        'complex.gro': 'pdb2gmx 결과',
+        'box.gro': 'editconf 결과',
+        'solv.gro': 'solvate 결과',
+        'solv_ions.gro': 'genion 결과',
+        
+        # 평형화 단계 결과
+        'equilibrated.gro': '평형화 결과',
+        'equilibrated.cpt': '평형화 체크포인트',
+        'em.gro': 'EM 결과',
+        'em.log': 'EM 로그',
+        'em.edr': 'EM 에너지',
+        'nvt.gro': 'NVT 결과',
+        'nvt.log': 'NVT 로그',
+        'nvt.cpt': 'NVT 체크포인트',
+        'npt.gro': 'NPT 결과',
+        'npt.log': 'NPT 로그',
+        'npt.cpt': 'NPT 체크포인트',
+        
+        # MD 결과 (부분적으로라도 생성된 경우)
+        'md.tpr': 'MD 입력',
+        'md.gro': 'MD 최종 구조',
+        'md.log': 'MD 로그',
+        'md.edr': 'MD 에너지',
+        'md.cpt': 'MD 체크포인트',
+        'md.xtc': 'MD 궤적',
+        
+        # 기타 스냅샷
+        'confout.gro': '마지막 좌표',
+        'ener.edr': '마지막 에너지',
+        'prev.gro': '이전 구조',
+        'prev.cpt': '이전 체크포인트'
+    }
+    
+    saved_files = []
+    for pattern, description in files_to_save.items():
+        if '*' in pattern:
+            # 와일드카드 패턴
+            for file_path in glob.glob(os.path.join(work_dir, pattern)):
+                if os.path.exists(file_path):
+                    dest = os.path.join(last_failed_dir, os.path.basename(file_path))
+                    shutil.copy(file_path, dest)
+                    saved_files.append(os.path.basename(file_path))
+        else:
+            # 단일 파일
+            file_path = os.path.join(work_dir, pattern)
+            if os.path.exists(file_path):
+                dest = os.path.join(last_failed_dir, pattern)
+                shutil.copy(file_path, dest)
+                saved_files.append(pattern)
+    
+    # 4. 저장된 파일 목록 기록
+    with open(os.path.join(last_failed_dir, "saved_files.txt"), "w") as f:
+        f.write(f"Total files saved: {len(saved_files)}\n")
+        f.write(f"Failed stage: {failed_stage}\n\n")
+        f.write("Files:\n")
+        for file in sorted(saved_files):
+            file_size = os.path.getsize(os.path.join(last_failed_dir, file))
+            f.write(f"  - {file} ({file_size} bytes)\n")
+    
+    total_size = sum(
+        os.path.getsize(os.path.join(last_failed_dir, f)) 
+        for f in os.listdir(last_failed_dir)
+    )
+    
+    logger.info(f"저장 완료: {len(saved_files)}개 파일, 총 {total_size / (1024*1024):.1f} MB")
+    logger.info(f"저장 위치: {last_failed_dir}")
+    
+    return last_failed_dir
 
 def create_mdp_files(work_dir, long_md=False):
     """MDP 파일들 생성 - SD integrator 및 랜덤 시드 적용"""
@@ -1195,6 +1588,7 @@ nsteps = {nsteps}
 nstenergy = {output_freq["energy"]}
 nstlog = {output_freq["log"]}
 nstxout-compressed = {output_freq["trajectory"]}
+continuation = yes
 tc-grps = System
 tau_t = 0.1
 ref_t = {md_settings["temperature"]}
@@ -1374,29 +1768,29 @@ pbc = xyz
         stages[-1]["stderr"]=stderr
         return stages
     
-    # 9. MD
+    # 9. MD - Long MD는 자동 복구 활성화
     md_label = "긴 MD" if long_md else "MD"
     log(f"{md_label} 실행")
     cmd = f"gmx grompp -f md.mdp -c npt.gro -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
     if success:
         timeout = TIMEOUT_LONG_MD if long_md else 3600
-        max_retries = 2 if long_md else 0  # Long MD만 재시작 시도
+        max_retries = 2 if long_md else 0
         cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md -ntomp {NTOMP} \
-        -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
-        if long_md:
-            log(f"{md_label} - checkpoint 복구 기능 활성화 (최대 {max_retries}회 재시작)")
-            success,returncode, stderr = run_mdrun_with_checkpoint_recovery(
-                cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout, max_retries=max_retries, is_long_md=True
-            )
-        else:
-            success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout)
-
+              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+        
+        success, returncode, stderr = run_command_with_output_check(
+            cmd, work_dir, 
+            expected_output=["md.gro", "md.xtc"], 
+            timeout=timeout,
+            max_retries=max_retries,
+            enable_cpi_recovery=long_md
+        )
+    
     stages.append({"stage": md_label, "success": success})
-
     if not success:
-        stages[-1]["stderr"]=stderr
-
+        stages[-1]["stderr"] = stderr
+    
     return stages
 
 # ===== 체인 복원 함수들 =====
@@ -1606,121 +2000,215 @@ def create_next_iteration_structure(work_dir, output_pdb, long_md=False):
 
 # ===== 시뮬레이션 실행 함수들 =====
 
-def run_attempt(work_dir, input_pdb, attempt_num, binding_site_residues, long_md=False):
-    """단일 attempt 실행"""
+def run_attempt(iteration_dir, prev_gro, prev_cpt, topology, attempt_num, binding_site_residues, long_md=False):
+    """
+    단일 attempt 실행 - 체크포인트에서 이어서 MD만 수행
+    
+    Args:
+        iteration_dir: iteration의 디렉토리
+        prev_gro: 이전 .gro 파일 경로
+        prev_cpt: 이전 .cpt 파일 경로
+        topology: topol.top 파일 경로
+        attempt_num: 현재 attempt 번호
+        binding_site_residues: binding site 잔기 리스트
+        long_md: 긴 MD 실행 여부
+    """
     logger.info(f"Attempt {attempt_num} 시작 {'(긴 MD)' if long_md else ''}")
     
-    # 작업 디렉토리 준비
-    attempt_dir = os.path.join(work_dir, f"attempt_{attempt_num}")
+    # attempt 작업 디렉토리 생성
+    attempt_dir = os.path.join(iteration_dir, f"attempt_{attempt_num}")
     ensure_clean_dir(attempt_dir)
     
-    # 입력 PDB 복사
-    shutil.copy(input_pdb, os.path.join(attempt_dir, "input.pdb"))
+    # SUMD 사이클 실행 (평형화 없이 MD만)
+    cycle_result = run_sumd_cycle(
+        work_dir=attempt_dir,
+        prev_gro=prev_gro,
+        prev_cpt=prev_cpt,
+        topology=topology,
+        cycle_num=attempt_num,
+        binding_site_residues=binding_site_residues,
+        long_md=long_md
+    )
     
-    # GROMACS 파이프라인 실행
-    stages = run_gromacs_pipeline(attempt_dir, "input.pdb", long_md)
-    
-    # 마지막 단계가 성공했는지 확인
-    if not stages or not stages[-1]["success"]:
-        log(f"Attempt {attempt_num} 실패: GROMACS 파이프라인 오류")
+    # 결과 검증
+    if not cycle_result['success']:
+        logger.error(f"Attempt {attempt_num} 실패: {cycle_result['error']}")
         return {
             "attempt": attempt_num,
             "success": False,
-            "stages": stages,
-            "reason": "gromacs_pipeline_failed",
+            "reason": cycle_result['error'],
             "long_md_executed": long_md
         }
     
-    # 궤적 분석
-    tpr_file = os.path.join(attempt_dir, "md.tpr")
-    xtc_file = os.path.join(attempt_dir, "md.xtc")
+    # 거리 및 기울기 분석
+    distances = cycle_result['distances']
+    slope = cycle_result['slope']
+    min_distance = cycle_result['min_distance']
     
-    distances = extract_distances_from_trajectory(tpr_file, xtc_file, binding_site_residues, attempt_dir)
-    
-    if len(distances) < 2:
-        log(f"Attempt {attempt_num} 실패: 거리 데이터 부족")
-        return {
-            "attempt": attempt_num,
-            "success": False,
-            "stages": stages,
-            "distances": distances,
-            "reason": "insufficient_distance_data",
-            "long_md_executed": long_md
-        }
-    
-    # 기울기 계산
-    slope = calculate_slope(distances)
-    min_distance = min(distances)
+    # 채택 조건 확인
     accepted = True if long_md else (slope < SLOPE_THRESHOLD)
     
-    log(f"Attempt {attempt_num} - 기울기: {slope:.6f}, 최소거리: {min_distance:.2f}Å, 채택: {accepted}")
-    
-    if accepted:
-        # 다음 iteration용 구조 생성
-        next_structure = os.path.join(work_dir, "next_structure.pdb")
-        structure_success = create_next_iteration_structure(attempt_dir, next_structure, long_md)
-        
-        if structure_success:
-            log(f"Attempt {attempt_num} 성공! 다음 iteration용 구조 생성 완료")
-        else:
-            log(f"Attempt {attempt_num} 성공! 하지만 구조 생성 실패")
+    logger.info(f"Attempt {attempt_num} - 기울기: {slope:.6f}, 최소거리: {min_distance:.2f}Å, 채택: {accepted}")
     
     return {
         "attempt": attempt_num,
         "success": accepted,
-        "stages": stages,
         "distances": distances,
         "slope": slope,
-        "initial_distance": distances[0],
-        "final_distance": distances[-1],
+        "initial_distance": cycle_result['initial_distance'],
+        "final_distance": cycle_result['final_distance'],
         "min_distance": min_distance,
         "long_md_executed": long_md,
-        "close_contact_detected": distances[-1] <= CLOSE_DISTANCE_THRESHOLD
+        "close_contact_detected": cycle_result['final_distance'] <= CLOSE_DISTANCE_THRESHOLD,
+        "gro_file": cycle_result['gro'],
+        "cpt_file": cycle_result['cpt'],
+        "topology": topology
     }
 
-def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, long_md=False):
-    """단일 iteration 실행 - binding_site_residues 매개변수 추가됨"""
+@handle_analysis_operations("gmx distance를 이용한 거리 측정")
+def extract_distances_from_trajectory_gmx(tpr_file, xtc_file, chain1, chain2, work_dir):
+    """
+    gmx distance를 사용하여 두 체인 간 최소 거리 측정
+    
+    Args:
+        tpr_file: TPR 파일 경로
+        xtc_file: XTC 파일 경로
+        chain1: 첫 번째 체인 ID
+        chain2: 두 번째 체인 ID
+        work_dir: 작업 디렉토리
+        
+    Returns:
+        list: 각 프레임의 거리 리스트 (Angstrom)
+    """
+    logger.info("gmx distance로 체인 간 거리 측정 시작")
+    
+    # 1. 인덱스 파일 생성 (두 체인을 그룹으로)
+    index_file = os.path.join(work_dir, "chains.ndx")
+    
+    # gmx select로 체인별 인덱스 생성
+    cmd_chain1 = f'echo "chain {chain1}" | gmx select -s {tpr_file} -on {index_file} -select "chain {chain1}"'
+    success1, _, stderr1 = run_command_with_output_check(cmd_chain1, work_dir)
+    
+    if not success1:
+        logger.warning(f"체인 {chain1} 인덱스 생성 실패, 대체 방법 시도")
+        # 대체: make_ndx 사용
+        cmd_make_ndx = f'echo -e "chain {chain1}\\nchain {chain2}\\nq\\n" | gmx make_ndx -f {tpr_file} -o {index_file}'
+        success, _, stderr = run_command_with_output_check(cmd_make_ndx, work_dir, expected_output=index_file)
+        if not success:
+            raise RuntimeError(f"인덱스 파일 생성 실패: {stderr}")
+    
+    # 2. gmx distance 실행
+    distance_xvg = os.path.join(work_dir, "distance.xvg")
+    
+    # 두 체인 간 최소 거리 계산
+    cmd_distance = f'echo -e "chain_{chain1}\\nchain_{chain2}\\n" | gmx distance -s {tpr_file} -f {xtc_file} -n {index_file} -oav {distance_xvg} -tu ns'
+    
+    success, _, stderr = run_command_with_output_check(cmd_distance, work_dir, expected_output=distance_xvg)
+    
+    if not success:
+        logger.warning("gmx distance 실패, 기존 방식으로 폴백")
+        raise RuntimeError(f"gmx distance 실패: {stderr}")
+    
+    # 3. XVG 파일에서 거리 데이터 파싱
+    distances = []
+    
+    with open(distance_xvg, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # 주석과 빈 줄 건너뛰기
+            if line.startswith('#') or line.startswith('@') or not line:
+                continue
+            
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    # 두 번째 컬럼이 거리 (nm 단위)
+                    distance_nm = float(parts[1])
+                    distance_angstrom = distance_nm * 10.0  # nm -> Angstrom
+                    distances.append(distance_angstrom)
+                except ValueError:
+                    continue
+    
+    logger.info(f"거리 측정 완료: {len(distances)}개 프레임, 범위 {min(distances):.2f}~{max(distances):.2f}Å")
+    
+    return distances
+
+def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, chain1, chain2, prev_equilibrated_state=None, long_md=False):
+    """
+    단일 iteration 실행
+    
+    Args:
+        prev_equilibrated_state: (gro, cpt, topology) 튜플 - iteration 1이 아닐 때 전달
+    """
     with logger.context(iteration=iteration_num):
         logger.info(f"Iteration 시작 {'(긴 MD)' if long_md else ''}")
-
+        
+        # iteration별 공유 디렉토리
+        iter_dir = work_dir
+        
+        # Iteration 1: 최초 평형화 수행
+        if iteration_num == 1:
+            logger.info("=== Iteration 1: 시스템 초기화 및 평형화 ===")
+            try:
+                equilibrated_gro, equilibrated_cpt, topology = initialize_system_once(
+                    iter_dir, input_pdb
+                )
+                logger.info("평형화 완료 - 이후 모든 attempt는 이 상태에서 시작")
+            except RuntimeError as e:
+                logger.error(f"평형화 실패: {e}")
+                return {
+                    "iteration": iteration_num,
+                    "success": False,
+                    "attempts_used": 0,
+                    "failure_type": "equilibration_failed",
+                    "error": str(e)
+                }
+        else:
+            # Iteration 2+: 이전 iteration의 최종 상태 사용
+            if prev_equilibrated_state is None:
+                raise ValueError("Iteration 2+ requires prev_equilibrated_state")
+            equilibrated_gro, equilibrated_cpt, topology = prev_equilibrated_state
+            logger.info(f"이전 iteration의 평형 상태 사용: {os.path.basename(equilibrated_gro)}")
+        
+        # 여러 attempt 시도
         for attempt in range(1, MAX_ATTEMPTS + 1):
             with logger.context(attempt=attempt):
-                # logger.info("Attempt 시작")
-                result = run_attempt(work_dir, input_pdb, attempt, binding_site_residues, long_md)
-            
+                result = run_attempt(
+                    iter_dir=iter_dir,
+                    prev_gro=equilibrated_gro,
+                    prev_cpt=equilibrated_cpt,
+                    topology=topology,
+                    attempt_num=attempt,
+                    binding_site_residues=binding_site_residues,
+                    chain1=chain1,  # 추가
+                    chain2=chain2,  # 추가
+                    long_md=long_md
+                )
+                
                 # JSON에 attempt 결과 저장
-                attempt_file = os.path.join(work_dir, f"iteration_{iteration_num}_attempt_{attempt}.json")
+                attempt_file = os.path.join(iter_dir, f"iteration_{iteration_num}_attempt_{attempt}.json")
                 with open(attempt_file, "w") as f:
                     json.dump(result, f, indent=2, default=str)
                 
                 if result["success"]:
                     logger.info("Iteration 성공!")
+                    # 다음 iteration을 위한 평형 상태 업데이트
+                    final_gro = result.get('gro_file')
+                    final_cpt = result.get('cpt_file')
+                    
                     return {
                         "iteration": iteration_num,
                         "success": True,
                         "attempts_used": attempt,
                         "final_result": result,
                         "long_md": long_md,
-                        "close_contact_in_iteration": result.get("close_contact_detected", False)
+                        "close_contact_in_iteration": result.get("close_contact_detected", False),
+                        "final_equilibrated_state": (final_gro, final_cpt, topology)
                     }
                 else:
-                    if result.get('stages') and result['stages'] and result['stages'][-1].get('stderr', 0):
-                        logger.error(f"GROMACS 오류로 실패")
-                        return {
-                            "iteration": iteration_num,
-                            "success": False,
-                            "attempts_used": attempt,
-                            "final_result": result,
-                            "long_md": long_md,
-                            "close_contact_in_iteration": False,
-                            "last_stderr": result["stages"][-1]["stderr"],
-                            "failure_type": "gromacs_error"
-                        }
-                    else:
-                        # 기울기 실패 등 다른 이유로 실패 - 다음 attempt 계속 시도
-                        logger.warning("기울기 조건 불만족 - 다음 attempt 시도")
-
+                    logger.warning(f"Attempt {attempt} 실패: {result.get('reason', '기울기 조건 불만족')}")
         
+        # 모든 attempt 실패
         logger.error(f"Iteration 실패: {MAX_ATTEMPTS}번 시도 모두 실패")
         return {
             "iteration": iteration_num,
@@ -1731,11 +2219,13 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, lon
             "close_contact_in_iteration": False,
             "failure_type": "max_attempts_exceeded"
         }
+    
 def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues, structure_results, original_pdb):
     """구조의 모든 iteration 실행"""
     iteration = 0
     need_long_md = False
     first_dir = None
+    prev_equilibrated_state = None  # (gro, cpt, topology) 튜플
     
     while iteration < MAX_ITERATIONS:
         iteration += 1
@@ -1745,11 +2235,18 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
         ensure_clean_dir(iter_dir)
         
         if first_dir is None:
-            first_dir = os.path.join(iter_dir, 'attempt_1')
+            first_dir = iter_dir
         
         # iteration 실행
         with logger.context(iteration=iteration):
-            iteration_result = run_iteration(iter_dir, current_pdb, iteration, binding_site_residues, need_long_md)
+            iteration_result = run_iteration(
+                work_dir=iter_dir,
+                input_pdb=current_pdb,
+                iteration_num=iteration,
+                binding_site_residues=binding_site_residues,
+                prev_equilibrated_state=prev_equilibrated_state,
+                long_md=need_long_md
+            )
             structure_results["iterations"].append(iteration_result)
             
             # iteration 결과 JSON 저장
@@ -1758,9 +2255,8 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
                 json.dump(iteration_result, f, indent=2, default=str)
             
             if iteration_result["success"]:
-                # 다음 iteration용 PDB 업데이트
-                next_structure = os.path.join(iter_dir, "next_structure.pdb")
-                current_pdb = prepare_next_iteration_structure(next_structure, first_dir)
+                # 다음 iteration을 위한 평형 상태 업데이트 (gro, cpt, topology)
+                prev_equilibrated_state = iteration_result.get("final_equilibrated_state")
                 
                 # 근접 접촉 검사 및 긴 MD 결정
                 if need_long_md:
@@ -1773,6 +2269,7 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
                     current_pdb = original_pdb  # 원점으로 돌아가기
                     iteration = 0
                     need_long_md = False
+                    prev_equilibrated_state = None  # 평형 상태 초기화
                     continue
     
     return first_dir
@@ -1818,21 +2315,44 @@ def should_restart_simulation(iteration_result):
         return True
 
 def save_final_structure(structure_results, struct_dir, first_dir):
-    """최종 구조 저장"""
+    """최종 구조 PDB로 저장 (시각화용)"""
     if not (structure_results["iterations"] and structure_results["iterations"][-1]["success"]):
         return
     
-    final_iter_dir = os.path.join(struct_dir, f'iteration_{len(structure_results["iterations"])}')
-    final_structure = os.path.join(final_iter_dir, "next_structure.pdb")
-    final_output = os.path.join(struct_dir, "final_structure.pdb")
+    final_result = structure_results["iterations"][-1]["final_result"]
+    final_gro = final_result.get("gro_file")
     
-    if os.path.exists(final_structure):
-        success = restore_original_chain_ids(final_structure, final_output, first_dir)
+    if not final_gro or not os.path.exists(final_gro):
+        logger.warning("최종 .gro 파일을 찾을 수 없음")
+        return
+    
+    # 최종 결과를 PDB로 변환 (시각화 및 분석용)
+    final_pdb = os.path.join(struct_dir, "final_structure.pdb")
+    
+    try:
+        # gro를 pdb로 변환
+        cmd = f"echo 'Protein' | gmx trjconv -s {os.path.join(os.path.dirname(final_gro), 'md.tpr')} -f {final_gro} -o {final_pdb}"
+        success, _, stderr = run_command_with_output_check(
+            cmd, struct_dir, expected_output=final_pdb
+        )
+        
         if success:
-            logger.info("최종 구조 저장 완료 (체인 복원됨)")
+            # 체인 복원
+            if ENABLE_CHAIN_RESTORATION:
+                restored_pdb = os.path.join(struct_dir, "final_structure_restored.pdb")
+                success = restore_original_chain_ids(final_pdb, restored_pdb, first_dir)
+                if success:
+                    shutil.move(restored_pdb, final_pdb)
+                    logger.info("최종 구조 저장 완료 (체인 복원됨)")
+                else:
+                    logger.warning("체인 복원 실패, 변환된 구조 사용")
+            
+            logger.info(f"최종 PDB 저장: {final_pdb}")
         else:
-            logger.warning("최종 구조 체인 복원 실패")
-            shutil.copy(final_structure, final_output)
+            logger.warning(f"PDB 변환 실패: {stderr}")
+            
+    except Exception as e:
+        logger.error(f"최종 구조 저장 중 오류: {e}")
 
 def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_queue, process_id):
     """GPU 할당된 단일 구조 시뮬레이션 실행 (배치 처리용) - 리팩토링됨"""
