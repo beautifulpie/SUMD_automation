@@ -252,7 +252,7 @@ class BatchAnalyzer:
                 ax1.set_title('Max Successful Iterations by PDB')
                 ax1.set_xticks(range(len(pdb_names)))
                 ax1.set_xticklabels(pdb_names, rotation=45)
-                ax1.yaxis.set_major_locator(MAXNLocator(integer=True))  # 정수 축
+                ax1.yaxis.set_major_locator(MaxNLocator(integer=True))  # 정수 축
                 ax1.grid(True, alpha=0.3)
             else:
                 ax1.text(0.5, 0.5, 'No PDB data available', ha='center', va='center', transform=ax1.transAxes)
@@ -277,7 +277,7 @@ class BatchAnalyzer:
                     ax_attempts.set_ylabel('Frequency')
                     ax_attempts.set_title('Attempts per Iteration Distribution')
                     ax_attempts.set_xticks(range(1, max_attempts + 1))
-                    ax_attempts.yaxis.set_major_locator(MAXNLocator(integer=True))  # 정수 축
+                    ax_attempts.yaxis.set_major_locator(MaxNLocator(integer=True))  # 정수 축
                     ax_attempts.grid(True, alpha=0.3)
                 else:
                     ax_attempts.text(0.5, 0.5, 'No iteration data', ha='center', va='center', transform=ax_attempts.transAxes)
@@ -306,7 +306,7 @@ class BatchAnalyzer:
                     ax_dist.set_ylabel('Frequency')
                     ax_dist.set_title('Minimum Distance Distribution (Successful)')
                     ax_dist.legend()
-                    ax_dist.yaxis.set_major_locator(MAXNLocator(integer=True))  # 정수 축
+                    ax_dist.yaxis.set_major_locator(MaxNLocator(integer=True))  # 정수 축
                     ax_dist.grid(True, alpha=0.3)
                 else:
                     ax_dist.text(0.5, 0.5, 'No distance data', ha='center', va='center', transform=ax_dist.transAxes)
@@ -538,7 +538,7 @@ class BatchAnalyzer:
                     ax.set_title(f'Distance Progress - {pdb_code} ({plotted_count} structures)')
                     ax.axhline(y=self.long_md_threshold, color='red', linestyle='--', 
                                    label=f'Long MD Threshold ({self.long_md_threshold}Å)')
-                    ax.xaxis.set_major_locator(MAXNLocator(integer=True))  # 정수 축
+                    ax.xaxis.set_major_locator(MaxNLocator(integer=True))  # 정수 축
                     ax.grid(True, alpha=0.3)
                     
                     # 범례 설정 (구조가 많으면 작게)
@@ -595,7 +595,7 @@ class BatchAnalyzer:
                 ax.set_xticks(x_pos)
                 ax.set_xticklabels(iteration_nums)
                 ax.yaxis.set_major_locator(MaxNLocator(integer=True))  # 정수 축
-                ax.yaxis.set_major_locator(MAXNLocator(integer=True))  # 정수 축
+                ax.yaxis.set_major_locator(MaxNLocator(integer=True))  # 정수 축
                 ax.legend()
                 ax.grid(True, alpha=0.3)
             else:
@@ -1249,3 +1249,7 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+if __name__=="__main__":
+    main()
