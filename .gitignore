@@ -2,3 +2,4 @@ __init__.py
 *.out*
 *.pyc*
 sumd_config.py
+.DS_Store
