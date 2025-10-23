@@ -74,13 +74,6 @@ MDP_SETTINGS = {
         "temperature": 300,
         "pressure": 1.0
     },
-    "npt2": {
-        "integrator": "md", 
-        "dt": 0.002,
-        "nsteps": 25000,  # 50ps
-        "temperature": 300,
-        "pressure": 1.0
-    },
     "md": {
         "integrator": "sd",
         "dt": 0.002,
@@ -88,7 +81,7 @@ MDP_SETTINGS = {
         "pressure": 1.0
     },
     "long_md": {
-        "integrator": "md",
+        "integrator": "sd",
         "dt": 0.002,
         "temperature": 300,
         "pressure": 1.0

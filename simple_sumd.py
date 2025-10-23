@@ -340,52 +340,67 @@ def extract_target_chains_pdb(input_pdb, output_pdb, chain1, chain2):
     logger.info(f"타겟 체인 추출 완료: {output_pdb} (체인: {chain1}, {chain2})")
     return True
 
-@handle_structure_operations(default_return=(None, None), context_info="체인 간 분리축 계산")
-def calculate_separation_axis(pdb_file, chain1, chain2):
-    """두 체인 간의 분리 축 계산"""
+@handle_structure_operations(default_return=(None, None, None), context_info="체인 간 분리축 계산")
+def calculate_separation_axis(pdb_file, chain1, chain2, binding_site_residues):
+    """두 체인 간의 분리 축 계산 (binding site CoM 기준)"""
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("structure", pdb_file)
     
-    chain_centers = {}
-    
+    # 1. Ligand CoM 계산
+    ligand_atoms = []
+    ligand_elements = []
     for model in structure:
         for chain in model:
-            if chain.id in [chain1, chain2]:
-                atoms = []
-                elements = []
+            if chain.id == chain2:  # ligand
                 for residue in chain:
                     for atom in residue:
-                        atoms.append(atom.coord)
-                        elements.append(atom.element)
-                
-                if atoms:
-                    center = calculate_mass_weighted_center(atoms, elements)
-                    if center is not None:
-                        chain_centers[chain.id] = center
+                        ligand_atoms.append(atom.coord)
+                        ligand_elements.append(atom.element)
     
-    if len(chain_centers) == 2:
-        # 순서를 명시적으로 지정
-        receptor_center = chain_centers[chain1]  # receptor
-        ligand_center = chain_centers[chain2]    # ligand
-        
-        # ligand에서 receptor로 향하는 벡터 (가까워지는 방향)
-        l2r_vector = receptor_center - ligand_center
-        l2r_vector = l2r_vector / np.linalg.norm(l2r_vector)
-        
-        logger.debug(f"Receptor center: {receptor_center}")
-        logger.debug(f"Ligand center: {ligand_center}")
-        logger.debug(f"분리 방향 (ligand→receptor): {l2r_vector}")
-        
-        return l2r_vector, chain_centers
+    if not ligand_atoms:
+        raise ValueError(f"Ligand 체인 {chain2}의 원자를 찾을 수 없음")
     
-    raise ValueError("체인 중심 계산 실패")
+    ligand_center = calculate_mass_weighted_center(ligand_atoms, ligand_elements)
+    
+    # 2. Binding site CoM 계산
+    binding_site_atoms = []
+    binding_site_elements = []
+    for model in structure:
+        for chain in model:
+            if chain.id == chain1:  # receptor
+                for residue in chain:
+                    residue_id = residue.get_id()
+                    full_id = f"{residue_id[1]}{residue_id[2].strip()}"
+                    if full_id in binding_site_residues:
+                        for atom in residue:
+                            binding_site_atoms.append(atom.coord)
+                            binding_site_elements.append(atom.element)
+    
+    if not binding_site_atoms:
+        raise ValueError("Binding site 원자를 찾을 수 없음")
+    
+    binding_site_center = calculate_mass_weighted_center(binding_site_atoms, binding_site_elements)
+    
+    # 3. Binding site → Ligand 벡터 (정규화하지 않음!)
+    b2l_vector = ligand_center - binding_site_center
+    current_distance = np.linalg.norm(b2l_vector)
+    
+    # 4. 정규화된 방향 벡터도 함께 반환 (원뿔 생성용)
+    b2l_direction = b2l_vector / current_distance
+    
+    logger.debug(f"Binding site CoM: {binding_site_center}")
+    logger.debug(f"Ligand CoM: {ligand_center}")
+    logger.debug(f"현재 거리: {current_distance:.2f}Å")
+    logger.debug(f"분리 방향: {b2l_direction}")
+    
+    return b2l_direction, b2l_vector, binding_site_center, ligand_center
 
 def generate_multi_direction_vectors(vector):
     """원뿔형 벡터 생성 - ROTATION_STEP 설정에 따라 분할 각도 조절"""
     vectors = []
     base_vector=-vector
     
-    # 1. 기준 벡터 (방향 30Å)
+    # 1. 기준 벡터 (역방향 단위 벡터)
     vectors.append(base_vector)
     # log(f"기준 방향 벡터 추가 {base_vector}")
     
@@ -412,6 +427,8 @@ def generate_multi_direction_vectors(vector):
         else:
             num_directions=360 // ROTATION_STEP
 
+        vectors_before = len(vectors)  # 현재 원뿔 시작 전 개수
+
         for i in range(num_directions):
 
             plane_angle_deg = directions[i] if ENABLE_RANDOM_DIRECTION else i * ROTATION_STEP
@@ -429,25 +446,43 @@ def generate_multi_direction_vectors(vector):
             
             vectors.append(cone_vector)
         
-        log(f"원뿔형 배치 완료: 총 {len(vectors)}개 방향 벡터 생성")
-        log(f"  - 기준 역방향: 1개")
-        log(f"  - 원뿔 표면 ({cone_angle_deg}도 반각): {len(vectors)-1}개")
-        log(f"  - 분할 각도: {ROTATION_STEP}도 간격 ({num_directions}개 방향)")
+        # 현재 원뿔에서 생성된 벡터 수
+        vectors_added = len(vectors) - vectors_before
+        log(f"원뿔 ({cone_angle_deg}도 반각): {vectors_added}개 방향 벡터 생성")
+        log(f"  - 분할: {ROTATION_STEP}도 간격 ({num_directions}개 방향)" if not ENABLE_RANDOM_DIRECTION else f"  - 랜덤 선택: {num_directions}개 방향")
+    
+    # 최종 요약 (루프 밖)
+    log(f"원뿔형 배치 완료: 총 {len(vectors)}개 방향 벡터 생성")
+    log(f"  - 기준 역방향: 1개")
+    log(f"  - 원뿔 표면 벡터: {len(vectors)-1}개 ({len(CONE_ANGLES)}개 원뿔)")
     
     return vectors
 
 @handle_file_operations("구조 이격 적용")
-def apply_structure_separation(input_pdb, output_pdb, separation_vector, distance, chain_to_move, l2r_vector):
-    """구조에 이격 적용"""
-
+def apply_structure_separation(input_pdb, output_pdb, separation_direction, target_distance, 
+                               chain_to_move, binding_site_center, current_ligand_center):
+    """
+    구조에 이격 적용 - CoM 재계산 없이 직접 이동
+    
+    Args:
+        separation_direction: 이격 방향 (단위 벡터)
+        target_distance: 목표 거리 (Å)
+        binding_site_center: Binding site CoM (이미 계산됨)
+        current_ligand_center: 현재 ligand CoM (이미 계산됨)
+    """
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("structure", input_pdb)
     
-    # 이동할 거리 벡터 계산 (Angstrom -> Angstrom)
-    move_vector = separation_vector * distance+l2r_vector
+    # 목표 ligand CoM 위치 계산
+    target_ligand_center = binding_site_center + separation_direction * target_distance
     
-    logger.debug(f"체인 {chain_to_move}를 {distance:.1f}Å 이동: {move_vector}")
+    # 이동 벡터 = 목표 위치 - 현재 위치
+    move_vector = target_ligand_center - current_ligand_center
     
+    logger.debug(f"이동 벡터 크기: {np.linalg.norm(move_vector):.2f}Å")
+    logger.debug(f"목표 거리: {target_distance:.2f}Å")
+    
+    # Ligand 이동
     for model in structure:
         for chain in model:
             if chain.id == chain_to_move:
@@ -455,12 +490,13 @@ def apply_structure_separation(input_pdb, output_pdb, separation_vector, distanc
                     for atom in residue:
                         atom.coord = atom.coord + move_vector
     
-    # 수정된 구조 저장
+    # 저장
     io = PDBIO()
     io.set_structure(structure)
     io.save(output_pdb)
     
-    logger.info(f"이격된 구조 저장: {output_pdb}")
+    logger.info(f"이격 완료: {output_pdb} (목표: {target_distance:.1f}Å)")
+    
     return True
 
 def create_rotation_matrix(axis, angle_degrees):
@@ -534,7 +570,7 @@ def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
     variants = []  #[base_pdb] 원본 포함
     
     if not ENABLE_ROTATIONAL_VARIANTS:
-        variants.extend(base_pdb)
+        variants.append(base_pdb)
         logger.info("회전 변형 비활성화됨 (ENABLE_ROTATIONAL_VARIANTS = False)")
         return variants
     
@@ -598,8 +634,8 @@ def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
     logger.info(f"회전 변형 완료: 회전 {variant_count-1}개 = 총 {len(variants)}개")
     return variants
 
-def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
-    """초기 구조 풀 생성 - 구조 리스트 반환"""
+def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir, binding_site_residues):
+    """초기 구조 풀 생성"""
     structure_pool = []
     
     if not ENABLE_MULTI_DIRECTION_SEPARATION:
@@ -624,23 +660,26 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
                         atom_count = sum(1 for residue in chain for atom in residue)
                         chain_sizes[chain.id] = atom_count
         except:
-            chain_sizes = {chain1: 1000, chain2: 1000}  # 기본값
+            chain_sizes = {chain1: 1000, chain2: 1000}
 
-        # 더 작은 체인 결정
         chain_to_move = chain1 if chain_sizes.get(chain1, 0) <= chain_sizes.get(chain2, 0) else chain2
         logger.info(f"이동할 체인: {chain_to_move} (크기: {chain_sizes.get(chain_to_move, 0)} 원자)")
         chain_to_stay = chain1 if chain_sizes.get(chain1, 0) >= chain_sizes.get(chain2, 0) else chain2
         logger.info(f"고정될 체인: {chain_to_stay} (크기: {chain_sizes.get(chain_to_stay, 0)} 원자)")
     
         
-        # 1단계:  축 계산, 
-        l2r_vector, chain_centers = calculate_separation_axis(input_pdb, chain_to_stay, chain_to_move)
-        if l2r_vector is None:
+        # 1단계: 축 계산 (binding site 기준, 정규화하지 않은 벡터)
+        b2l_direction, b2l_vector, binding_site_center, ligand_center = calculate_separation_axis(
+            input_pdb, chain_to_stay, chain_to_move, binding_site_residues
+        )
+        
+        if b2l_direction is None:
             logger.warning("분리 축 계산 실패 - 원본 구조 사용")
             return [input_pdb]
         
-        # 2단계: 다방향 벡터 생성 (원뿔형)
-        direction_vectors = generate_multi_direction_vectors(l2r_vector)
+        # 2단계: 다방향 벡터 생성 (원뿔형, 정규화된 방향 벡터 사용)
+        # b2l_direction의 반대 = ligand에서 멀어지는 방향
+        direction_vectors = generate_multi_direction_vectors(b2l_direction)
         
         # 3단계: 각 방향으로 이격된 구조 생성
         base_structures = []
@@ -648,8 +687,10 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
         for i, direction in enumerate(direction_vectors):
             separated_pdb = os.path.join(pool_dir, format_filename('variant_separation', num=i))
             
-            if apply_structure_separation(input_pdb, separated_pdb, direction, 
-                                        SEPARATION_DISTANCE, chain_to_move, l2r_vector):
+            if apply_structure_separation(
+                input_pdb, separated_pdb, direction, SEPARATION_DISTANCE,
+                chain_to_move, binding_site_center, ligand_center
+            ):
                 base_structures.append(separated_pdb)
                 log(f"이격 구조 {i} 생성: {separated_pdb}")
         
@@ -658,7 +699,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
             variants = generate_structure_variants(base_struct, pool_dir, f"sep{i}", chain_to_move)
             structure_pool.extend(variants)
         
-        logger.info(f"구조 풀 생성 완료: 이 {len(structure_pool)}개 구조")
+        logger.info(f"구조 풀 생성 완료: 총 {len(structure_pool)}개 구조")
         
         # 구조 풀 정보 저장
         pool_info = {
@@ -802,7 +843,10 @@ def process_single_pdb_file(pdb_file, base_output_dir):
             return None
         
         # 구조 풀 생성
-        structure_pool = create_initial_structure_pool(target_pdb, pdb_info['chain1'], pdb_info['chain2'], pdb_output_dir)
+        structure_pool = create_initial_structure_pool(
+            target_pdb, pdb_info['chain1'], pdb_info['chain2'], 
+            pdb_output_dir, binding_info['binding_site_residues']  # binding_site_residues 전달
+        )
         
         # 최종 정보 구성
         complete_pdb_info = {
@@ -1149,7 +1193,7 @@ pbc = xyz
         raise RuntimeError(f"genion 실패: {stderr}")
     
     # MDP 파일들 생성
-    create_mdp_files(work_dir, long_md=False)
+    create_mdp_files(work_dir, cpi_option=False, long_md=False)
     
     # 6. EM (Energy Minimization)
     logger.info("6/8: 에너지 최소화 (EM) 실행")
@@ -1178,7 +1222,7 @@ pbc = xyz
         raise RuntimeError(f"NVT grompp 실패: {stderr}")
     
     cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} \
-          -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"], timeout=TIMEOUT_GROMACS
     )
@@ -1195,26 +1239,27 @@ pbc = xyz
         raise RuntimeError(f"NPT grompp 실패: {stderr}")
     
     cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt -ntomp {NTOMP} \
-          -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
     success, returncode, stderr = run_command_with_output_check(
-        cmd, work_dir, expected_output=["npt.gro", "npt.cpt"], timeout=TIMEOUT_GROMACS
+        cmd, work_dir, expected_output="npt.gro", timeout=TIMEOUT_GROMACS
     )
     if not success:
         raise RuntimeError(f"NPT mdrun 실패: {stderr}")
     
     # 평형화 결과 파일들 복사
     equilibrated_gro = os.path.join(work_dir, "equilibrated.gro")
-    equilibrated_cpt = os.path.join(work_dir, "equilibrated.cpt")
     topology = os.path.join(work_dir, "topol.top")
     
     shutil.copy(os.path.join(work_dir, "npt.gro"), equilibrated_gro)
-    shutil.copy(os.path.join(work_dir, "npt.cpt"), equilibrated_cpt)
+
+
     
     logger.info("=== 평형화 완료 ===")
-    logger.info(f"평형화 결과: equilibrated.gro, equilibrated.cpt")
+    logger.info(f"평형화 결과: equilibrated.gro")
     
-    return equilibrated_gro, equilibrated_cpt, topology
-def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_site_residues, long_md=False):
+    return equilibrated_gro, None, topology
+
+def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_site_residues, enable_cpi=True, long_md=False):
     """
     체크포인트에서 이어서 SUMD MD 수행 (연속된 시간)
     """
@@ -1233,7 +1278,7 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_si
     
     try:
         # MDP 파일 생성
-        create_mdp_files(work_dir, long_md=long_md)
+        create_mdp_files(work_dir, cpi_option=enable_cpi, long_md=long_md)
         
         # 이전 체크포인트 복사
         local_prev_gro = os.path.join(work_dir, "prev.gro")
@@ -1241,14 +1286,16 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_si
         local_topology = os.path.join(work_dir, "topol.top")
         
         shutil.copy(prev_gro, local_prev_gro)
-        shutil.copy(prev_cpt, local_prev_cpt)
+        if prev_cpt is not None:  # ✓ None 체크 추가
+            shutil.copy(prev_cpt, local_prev_cpt)
         shutil.copy(topology, local_topology)
         
         logger.info(f"체크포인트 로드: {os.path.basename(prev_gro)}, {os.path.basename(prev_cpt)}")
         
         # 1. grompp
         logger.info(f"1/2: MD grompp 실행")
-        cmd = f"gmx grompp -f md.mdp -c prev.gro -t prev.cpt -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
+        cpt_option = "-t prev.cpt" if enable_cpi else ""
+        cmd = f"gmx grompp -f md.mdp -c prev.gro {cpt_option} -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
         success, returncode, stderr = run_command_with_output_check(
             cmd, work_dir, expected_output="md.tpr"
         )
@@ -1257,14 +1304,15 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_si
             logger.error(result['error'])
             return result
         
-        # 2. mdrun - 연속 시간으로 실행
-        logger.info(f"2/2: {md_label} 실행 (연속 시간)")
+        # 2. mdrun - enable_cpi에 따라 -cpi 옵션 추가/제거
+        logger.info(f"2/2: {md_label} 실행 {'(체크포인트 연속)' if enable_cpi else '(새로 시작)'}")
         timeout = TIMEOUT_LONG_MD if long_md else TIMEOUT_GROMACS
         max_retries = 2 if long_md else 0
         
-        # 항상 -cpi 사용하여 연속된 시간으로 실행
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md -cpi prev.cpt -ntomp {NTOMP} \
-              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+        # enable_cpi에 따라 -cpi 옵션 추가 여부 결정 (수정된 부분)
+        cpi_option = "-cpi prev.cpt" if enable_cpi else ""
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md {cpi_option} -ntomp {NTOMP} \
+              -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
         
         success, returncode, stderr = run_command_with_output_check(
             cmd, 
@@ -1451,14 +1499,13 @@ def save_last_failed_attempt(work_dir, failed_stage, error_info, attempt_num):
     
     return last_failed_dir
 
-def create_mdp_files(work_dir, long_md=False):
+def create_mdp_files(work_dir, cpi_option=True, long_md=False):
     """MDP 파일들 생성 - SD integrator 및 랜덤 시드 적용"""
     
     try:
         em_settings = MDP_SETTINGS["em"]
         nvt_settings = MDP_SETTINGS["nvt"] 
         npt_settings = MDP_SETTINGS["npt"]
-        npt2_settings = MDP_SETTINGS["npt2"]
         md_settings = MDP_SETTINGS["md"]
         output_freq = OUTPUT_FREQUENCY
         
@@ -1468,10 +1515,10 @@ def create_mdp_files(work_dir, long_md=False):
         em_settings = {"integrator": "steep", "nsteps": 50000, "emtol": 1000.0, "emstep": 0.01}
         nvt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300}
         npt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
-        npt2_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
         md_settings = {"integrator": "sd", "dt": 0.002, "temperature": 300, "pressure": 1.0}
         output_freq = {"energy": 5000, "log": 5000, "trajectory": 5000}
     
+    continuation_opt = "yes" if cpi_option else "no"
     # EM MDP
     em_mdp = f"""integrator = {em_settings["integrator"]}
 nsteps = {em_settings["nsteps"]}
@@ -1522,7 +1569,7 @@ nsteps = {npt_settings["nsteps"]}
 nstenergy = {output_freq["energy"]//10}
 nstlog = {output_freq["log"]//10}
 nstxout-compressed = {output_freq["trajectory"]//10}
-continuation = yes
+continuation = {continuation_opt}
 constraints = h-bonds
 constraint_algorithm = lincs
 refcoord_scaling = com
@@ -1546,37 +1593,6 @@ compressibility = 4.5e-5
 pbc = xyz
 gen_vel = no
 """
-
-# NPT2 MDP - SD integrator with random seed
-    npt2_mdp = f"""integrator = sd
-dt = {npt2_settings["dt"]}
-nsteps = {npt2_settings["nsteps"]}
-nstenergy = {output_freq["energy"]//10}
-nstlog = {output_freq["log"]//10}
-nstxout-compressed = {output_freq["trajectory"]//10}
-continuation = yes
-constraints = h-bonds
-constraint_algorithm = lincs
-cutoff-scheme = Verlet
-ns_type = grid
-nstlist = 10
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-coulombtype = PME
-tc-grps = System
-tau_t = 0.1
-ref_t = {npt_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = Parrinello-Rahman
-pcoupltype = isotropic
-tau_p = 2.0
-ref_p = {npt_settings["pressure"]}
-compressibility = 4.5e-5
-pbc = xyz
-gen_vel = no
-"""
     
     # MD MDP - SD integrator with random seed
     simulation_time = LONG_MD_TIME_NS if long_md else SIMULATION_TIME_NS
@@ -1588,7 +1604,7 @@ nsteps = {nsteps}
 nstenergy = {output_freq["energy"]}
 nstlog = {output_freq["log"]}
 nstxout-compressed = {output_freq["trajectory"]}
-continuation = yes
+continuation = {continuation_opt}
 tc-grps = System
 tau_t = 0.1
 ref_t = {md_settings["temperature"]}
@@ -1613,7 +1629,7 @@ pbc = xyz
     
     # 파일들 저장
     for name, content in [("em.mdp", em_mdp), ("nvt.mdp", nvt_mdp), 
-                         ("npt.mdp", npt_mdp), ("npt2.mdp", npt2_mdp), ("md.mdp", md_mdp)]:
+                         ("npt.mdp", npt_mdp), ("md.mdp", md_mdp)]:
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
@@ -1662,136 +1678,6 @@ def calculate_slope(distances):
     denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
     
     return numerator / denominator if denominator != 0 else 0.0
-
-def run_gromacs_pipeline(work_dir, input_pdb, long_md=False):
-    """GROMACS 파이프라인 실행"""
-    stages = []
-    
-    # 1. pdb2gmx
-    log("pdb2gmx 실행")
-    cmd = f"echo '1\\n1' | gmx pdb2gmx -f {input_pdb} -o complex.gro -p topol.top \
-          -water {WATER_MODEL} -ff {FORCE_FIELD} -ignh"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["complex.gro", "topol.top"])
-    stages.append({"stage": "pdb2gmx", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 2. editconf
-    log("editconf 실행")
-    cmd = f"gmx editconf -f complex.gro -o box.gro -c -d {BOX_DISTANCE} -bt cubic"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="box.gro")
-    stages.append({"stage": "editconf", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 3. solvate
-    log("solvate 실행")
-    cmd = "gmx solvate -cp box.gro -cs spc216.gro -o solv.gro -p topol.top"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="solv.gro")
-    stages.append({"stage": "solvate", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 4. ions grompp
-    log("ions grompp 실행")
-    with open(os.path.join(work_dir, "ions.mdp"), "w") as f:
-        f.write("""integrator = steep
-emtol = 1000.0
-emstep = 0.01
-nsteps = 50000
-nstlist = 1
-cutoff-scheme = Verlet
-ns_type = grid
-coulombtype = cutoff
-rcoulomb = 1.0
-rvdw = 1.0
-pbc = xyz
-""")
-    cmd = f"gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="ions.tpr")
-    stages.append({"stage": "ions_grompp", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 5. genion
-    log("genion 실행")
-    cmd = "echo 'SOL' | gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="solv_ions.gro")
-    stages.append({"stage": "genion", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # MDP 파일들 생성
-    create_mdp_files(work_dir, long_md)
-    
-    # 6. EM
-    log("EM 실행")
-    cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="em.tpr")
-    if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm em -ntomp {NTOMP} \
-              -nb gpu -gpu_id {GPU_ID}"
-        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["em.gro", "em.edr"])
-    stages.append({"stage": "em", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 7. NVT
-    log("NVT 실행")
-    cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
-    if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} \
-              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
-        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
-    stages.append({"stage": "nvt", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 8. NPT
-    log("NPT 실행")
-    cmd = f"gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt.tpr")
-    if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt -ntomp {NTOMP} \
-              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
-        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt.gro", "npt.cpt"])
-    stages.append({"stage": "npt", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 9. MD - Long MD는 자동 복구 활성화
-    md_label = "긴 MD" if long_md else "MD"
-    log(f"{md_label} 실행")
-    cmd = f"gmx grompp -f md.mdp -c npt.gro -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
-    if success:
-        timeout = TIMEOUT_LONG_MD if long_md else 3600
-        max_retries = 2 if long_md else 0
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md -ntomp {NTOMP} \
-              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
-        
-        success, returncode, stderr = run_command_with_output_check(
-            cmd, work_dir, 
-            expected_output=["md.gro", "md.xtc"], 
-            timeout=timeout,
-            max_retries=max_retries,
-            enable_cpi_recovery=long_md
-        )
-    
-    stages.append({"stage": md_label, "success": success})
-    if not success:
-        stages[-1]["stderr"] = stderr
-    
-    return stages
 
 # ===== 체인 복원 함수들 =====
 @handle_structure_operations(default_return=[], context_info="원본 체인 순서 추출")
@@ -1973,34 +1859,9 @@ def restore_original_chain_ids(gromacs_pdb, output_pdb, work_dir):
     else:
         return False
 
-@handle_gromacs_operations("다음 iteration 구조 생성")
-def create_next_iteration_structure(work_dir, output_pdb, long_md=False):
-    """다음 iteration을 위한 구조 생성 (protein group 선택, 체인 정보 보존)"""
-    tpr_file = os.path.join(work_dir, "md.tpr")
-    gro_file = os.path.join(work_dir, "md.gro")
-    
-    # GROMACS로 protein만 추출
-    temp_pdb = os.path.join(work_dir, "protein_only.pdb")
-    cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {gro_file} -o {temp_pdb}"
-    
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="protein_only.pdb")
-
-    if not success:
-        raise RuntimeError("protein 추출 실패")
-    
-    shutil.copy(temp_pdb, output_pdb)
-    logger.info("다음 iteration용 구조 복사 완료")
-
-    # 임시 파일 정리
-    if os.path.exists(temp_pdb):
-        os.remove(temp_pdb)
-    
-    return True
-        
-
 # ===== 시뮬레이션 실행 함수들 =====
 
-def run_attempt(iteration_dir, prev_gro, prev_cpt, topology, attempt_num, binding_site_residues, long_md=False):
+def run_attempt(iteration_dir, prev_gro, prev_cpt, topology, attempt_num, binding_site_residues, enable_cpi=True, long_md=False):
     """
     단일 attempt 실행 - 체크포인트에서 이어서 MD만 수행
     
@@ -2011,6 +1872,7 @@ def run_attempt(iteration_dir, prev_gro, prev_cpt, topology, attempt_num, bindin
         topology: topol.top 파일 경로
         attempt_num: 현재 attempt 번호
         binding_site_residues: binding site 잔기 리스트
+        enable_cpi : cpi(iter!=1,true) 여부
         long_md: 긴 MD 실행 여부
     """
     logger.info(f"Attempt {attempt_num} 시작 {'(긴 MD)' if long_md else ''}")
@@ -2027,6 +1889,7 @@ def run_attempt(iteration_dir, prev_gro, prev_cpt, topology, attempt_num, bindin
         topology=topology,
         cycle_num=attempt_num,
         binding_site_residues=binding_site_residues,
+        enable_cpi=enable_cpi,
         long_md=long_md
     )
     
@@ -2133,18 +1996,12 @@ def extract_distances_from_trajectory_gmx(tpr_file, xtc_file, chain1, chain2, wo
     
     return distances
 
-def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, chain1, chain2, prev_equilibrated_state=None, long_md=False):
-    """
-    단일 iteration 실행
-    
-    Args:
-        prev_equilibrated_state: (gro, cpt, topology) 튜플 - iteration 1이 아닐 때 전달
-    """
+def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, prev_equilibrated_state=None, long_md=False):
     with logger.context(iteration=iteration_num):
         logger.info(f"Iteration 시작 {'(긴 MD)' if long_md else ''}")
         
-        # iteration별 공유 디렉토리
         iter_dir = work_dir
+        enable_cpi = (iteration_num > 1)
         
         # Iteration 1: 최초 평형화 수행
         if iteration_num == 1:
@@ -2154,6 +2011,23 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, cha
                     iter_dir, input_pdb
                 )
                 logger.info("평형화 완료 - 이후 모든 attempt는 이 상태에서 시작")
+                
+                # 추가: GRO를 PDB로 변환 후 초기 거리 측정 (Iteration 1에서만)
+                equilibrated_pdb = os.path.join(iter_dir, "equilibrated.pdb")
+                cmd = f"echo 'Protein' | gmx trjconv -s {os.path.join(iter_dir, 'npt.tpr')} -f {equilibrated_gro} -o {equilibrated_pdb}"
+                success, _, stderr = run_command_with_output_check(
+                    cmd, iter_dir, expected_output="equilibrated.pdb"
+                )
+                
+                if success:
+                    iteration_initial_distance = calculate_distance_binding_site(
+                        equilibrated_pdb, binding_site_residues
+                    )
+                    logger.info(f"전처리 후 초기 거리: {iteration_initial_distance:.2f}Å")
+                else:
+                    logger.warning(f"GRO→PDB 변환 실패: {stderr}, 초기 거리 측정 생략")
+                    iteration_initial_distance = None
+                
             except RuntimeError as e:
                 logger.error(f"평형화 실패: {e}")
                 return {
@@ -2164,11 +2038,11 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, cha
                     "error": str(e)
                 }
         else:
-            # Iteration 2+: 이전 iteration의 최종 상태 사용
             if prev_equilibrated_state is None:
                 raise ValueError("Iteration 2+ requires prev_equilibrated_state")
             equilibrated_gro, equilibrated_cpt, topology = prev_equilibrated_state
             logger.info(f"이전 iteration의 평형 상태 사용: {os.path.basename(equilibrated_gro)}")
+            iteration_initial_distance = None  # Iteration 2+는 MD 첫 프레임 사용
         
         # 여러 attempt 시도
         for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -2180,8 +2054,7 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, cha
                     topology=topology,
                     attempt_num=attempt,
                     binding_site_residues=binding_site_residues,
-                    chain1=chain1,  # 추가
-                    chain2=chain2,  # 추가
+                    enable_cpi=enable_cpi,
                     long_md=long_md
                 )
                 
@@ -2192,14 +2065,19 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, cha
                 
                 if result["success"]:
                     logger.info("Iteration 성공!")
-                    # 다음 iteration을 위한 평형 상태 업데이트
                     final_gro = result.get('gro_file')
                     final_cpt = result.get('cpt_file')
+                    
+                    # Iteration 2+에서는 채택된 attempt의 MD 첫 번째 프레임 거리 사용
+                    if iteration_initial_distance is None and 'initial_distance' in result:
+                        iteration_initial_distance = result['initial_distance']
+                        logger.info(f"Iteration {iteration_num} 초기 거리 (채택된 MD 첫 프레임): {iteration_initial_distance:.2f}Å")
                     
                     return {
                         "iteration": iteration_num,
                         "success": True,
                         "attempts_used": attempt,
+                        "iteration_initial_distance": iteration_initial_distance,  # 이제 Iteration 2+에서도 값이 채워짐
                         "final_result": result,
                         "long_md": long_md,
                         "close_contact_in_iteration": result.get("close_contact_detected", False),
@@ -2214,6 +2092,7 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, cha
             "iteration": iteration_num,
             "success": False,
             "attempts_used": MAX_ATTEMPTS,
+            "iteration_initial_distance": iteration_initial_distance,  # ⭐ 추가
             "final_result": result,
             "long_md": long_md,
             "close_contact_in_iteration": False,
@@ -2273,19 +2152,6 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
                     continue
     
     return first_dir
-
-def prepare_next_iteration_structure(next_structure, first_dir):
-    """다음 iteration용 구조 준비"""
-    if ENABLE_CHAIN_RESTORATION:
-        success = restore_original_chain_ids(next_structure, next_structure, first_dir)
-        if success:
-            logger.info("다음 구조 저장 완료 (체인 복원됨)")
-        else:
-            logger.warning("체인 복원 실패, 변환된 구조 사용")
-    
-    if os.path.exists(next_structure):
-        return next_structure
-    return None
 
 def handle_close_contact_detection(iteration_result, current_need_long_md):
     """근접 접촉 감지 및 긴 MD 실행 결정"""
