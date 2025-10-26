@@ -1285,10 +1285,19 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_si
         local_prev_cpt = os.path.join(work_dir, "prev.cpt")
         local_topology = os.path.join(work_dir, "topol.top")
         
-        shutil.copy(prev_gro, local_prev_gro)
+        logger.info(f"prev_gro : {prev_gro}, prev_cpt : {prev_cpt}, topology : {topology}")
+        logger.info(f"local_prev_gro : {local_prev_gro}, local_prev_cpt : {local_prev_cpt}, local_topology : {local_topology}")
+        
+        if prev_gro is not None:  # ✓ None 체크 추가
+            shutil.copy(prev_gro, local_prev_gro)
+        else:
+            raise ValueError("prev_gro is None")
         if prev_cpt is not None:  # ✓ None 체크 추가
             shutil.copy(prev_cpt, local_prev_cpt)
-        shutil.copy(topology, local_topology)
+        if topology is not None:  # ✓ None 체크 추가
+            shutil.copy(topology, local_topology)
+        else:
+            raise ValueError("topology is None")
         
         logger.info(f"체크포인트 로드: {os.path.basename(prev_gro)}, {os.path.basename(prev_cpt)}")
         
@@ -2117,7 +2126,15 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
             "close_contact_in_iteration": False,
             "failure_type": "max_attempts_exceeded"
         }
-    
+
+def make_dir(dir_path):
+    """디렉토리 생성"""
+    if not os.path.exists(dir_path):
+        os.makedirs(dir_path)
+        logger.info(f"디렉토리 생성: {dir_path}")
+
+
+
 def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues, structure_results, original_pdb):
     """구조의 모든 iteration 실행"""
     iteration = 0
