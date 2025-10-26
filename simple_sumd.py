@@ -1193,7 +1193,7 @@ pbc = xyz
         raise RuntimeError(f"genion 실패: {stderr}")
     
     # MDP 파일들 생성
-    create_mdp_files(work_dir, cpi_option=False, long_md=False)
+    create_premd_mdp_files(work_dir, cpi_option=False, long_md=False)
     
     # 6. EM (Energy Minimization)
     logger.info("6/8: 에너지 최소화 (EM) 실행")
@@ -1278,7 +1278,7 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_si
     
     try:
         # MDP 파일 생성
-        create_mdp_files(work_dir, cpi_option=enable_cpi, long_md=long_md)
+        create_md_mdp_files(work_dir, cpi_option=enable_cpi, long_md=long_md)
         
         # 이전 체크포인트 복사
         local_prev_gro = os.path.join(work_dir, "prev.gro")
@@ -1499,100 +1499,20 @@ def save_last_failed_attempt(work_dir, failed_stage, error_info, attempt_num):
     
     return last_failed_dir
 
-def create_mdp_files(work_dir, cpi_option=True, long_md=False):
+def create_md_mdp_files(work_dir, cpi_option=True, long_md=False):
     """MDP 파일들 생성 - SD integrator 및 랜덤 시드 적용"""
     
     try:
-        em_settings = MDP_SETTINGS["em"]
-        nvt_settings = MDP_SETTINGS["nvt"] 
-        npt_settings = MDP_SETTINGS["npt"]
         md_settings = MDP_SETTINGS["md"]
         output_freq = OUTPUT_FREQUENCY
         
         if long_md and "long_md" in MDP_SETTINGS:
             md_settings = MDP_SETTINGS["long_md"]
     except (NameError, KeyError):
-        em_settings = {"integrator": "steep", "nsteps": 50000, "emtol": 1000.0, "emstep": 0.01}
-        nvt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300}
-        npt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
         md_settings = {"integrator": "sd", "dt": 0.002, "temperature": 300, "pressure": 1.0}
         output_freq = {"energy": 5000, "log": 5000, "trajectory": 5000}
-    
+
     continuation_opt = "yes" if cpi_option else "no"
-    # EM MDP
-    em_mdp = f"""integrator = {em_settings["integrator"]}
-nsteps = {em_settings["nsteps"]}
-emtol = {em_settings["emtol"]}
-emstep = {em_settings["emstep"]}
-nstlist = 1
-cutoff-scheme = Verlet
-ns_type = grid
-coulombtype = PME
-rcoulomb = 1.0
-rvdw = 1.0
-pbc = xyz
-"""
-    
-    # NVT MDP - SD integrator with random seed
-    nvt_mdp = f"""integrator = sd
-dt = {nvt_settings["dt"]}
-nsteps = {nvt_settings["nsteps"]}
-nstenergy = {output_freq["energy"]//10}
-nstlog = {output_freq["log"]//10}
-nstxout-compressed = {output_freq["trajectory"]//10}
-constraints = h-bonds
-constraint_algorithm = lincs
-cutoff-scheme = Verlet
-ns_type = grid
-nstlist = 10
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-coulombtype = PME
-tc-grps = System
-tau_t = 0.1
-ref_t = {nvt_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = no
-pbc = xyz
-gen_vel = yes
-gen_temp = {nvt_settings["temperature"]}
-gen_seed = -1
-"""
-    
-    # NPT MDP - SD integrator with random seed
-    npt_mdp = f"""define = -DPOSRES
-integrator = sd
-dt = {npt_settings["dt"]}
-nsteps = {npt_settings["nsteps"]}
-nstenergy = {output_freq["energy"]//10}
-nstlog = {output_freq["log"]//10}
-nstxout-compressed = {output_freq["trajectory"]//10}
-continuation = {continuation_opt}
-constraints = h-bonds
-constraint_algorithm = lincs
-refcoord_scaling = com
-cutoff-scheme = Verlet
-ns_type = grid
-nstlist = 10
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-coulombtype = PME
-tc-grps = System
-tau_t = 0.1
-ref_t = {npt_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = C-rescale
-pcoupltype = isotropic
-tau_p = 2.0
-ref_p = {npt_settings["pressure"]}
-compressibility = 4.5e-5
-pbc = xyz
-gen_vel = no
-"""
     
     # MD MDP - SD integrator with random seed
     simulation_time = LONG_MD_TIME_NS if long_md else SIMULATION_TIME_NS
@@ -1626,10 +1546,109 @@ rvdw = 1.0
 DispCorr = EnerPres
 pbc = xyz
 """
+    for name, content in [("md.mdp", md_mdp)]:
+        with open(os.path.join(work_dir, name), "w") as f:
+            f.write(content)
+
+
+def create_premd_mdp_files(work_dir, cpi_option=True, long_md=False):
+    """MDP 파일들 생성 - SD integrator 및 랜덤 시드 적용"""
+    
+    try:
+        em_settings = MDP_SETTINGS["em"]
+        nvt_settings = MDP_SETTINGS["nvt"]
+        npt_settings = MDP_SETTINGS["npt"]
+        md_settings = MDP_SETTINGS["md"]
+        output_freq = OUTPUT_FREQUENCY
+        
+        if long_md and "long_md" in MDP_SETTINGS:
+            md_settings = MDP_SETTINGS["long_md"]
+    except (NameError, KeyError):
+        em_settings = {"integrator": "steep", "nsteps": 50000, "emtol": 1000.0, "emstep": 0.01}
+        nvt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300}
+        npt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
+        md_settings = {"integrator": "sd", "dt": 0.002, "temperature": 300, "pressure": 1.0}
+        output_freq = {"energy": 5000, "log": 5000, "trajectory": 5000}
+    
+    continuation_opt = "yes" if cpi_option else "no"
+    # EM MDP
+    em_mdp = f"""integrator = {em_settings["integrator"]}
+nsteps = {em_settings["nsteps"]}
+emtol = {em_settings["emtol"]}
+emstep = {em_settings["emstep"]}
+nstlist = 1
+cutoff-scheme = Verlet
+ns_type = grid
+coulombtype = PME
+rcoulomb = 1.0
+rvdw = 1.0
+pbc = xyz
+"""
+    
+    # NVT MDP - SD integrator with random seed
+    nvt_mdp = f"""integrator = sd
+dt = {nvt_settings["dt"]}
+nsteps = {nvt_settings["nsteps"]}
+nstenergy = {output_freq["energy"]}
+nstlog = {output_freq["log"]}
+nstxout-compressed = {output_freq["trajectory"]}
+constraints = h-bonds
+constraint_algorithm = lincs
+cutoff-scheme = Verlet
+ns_type = grid
+nstlist = 10
+rcoulomb = 1.0
+rvdw = 1.0
+DispCorr = EnerPres
+coulombtype = PME
+tc-grps = System
+tau_t = 0.1
+ref_t = {nvt_settings["temperature"]}
+bd-fric = 0
+ld-seed = -1
+pcoupl = no
+pbc = xyz
+gen_vel = yes
+gen_temp = {nvt_settings["temperature"]}
+gen_seed = -1
+"""
+    
+    # NPT MDP - SD integrator with random seed
+    npt_mdp = f"""define = -DPOSRES
+integrator = sd
+dt = {npt_settings["dt"]}
+nsteps = {npt_settings["nsteps"]}
+nstenergy = {output_freq["energy"]}
+nstlog = {output_freq["log"]}
+nstxout-compressed = {output_freq["trajectory"]}
+constraints = h-bonds
+constraint_algorithm = lincs
+refcoord_scaling = com
+cutoff-scheme = Verlet
+ns_type = grid
+nstlist = 10
+rcoulomb = 1.0
+rvdw = 1.0
+DispCorr = EnerPres
+coulombtype = PME
+tc-grps = System
+tau_t = 0.1
+ref_t = {npt_settings["temperature"]}
+bd-fric = 0
+ld-seed = -1
+pcoupl = C-rescale
+pcoupltype = isotropic
+tau_p = 2.0
+ref_p = {npt_settings["pressure"]}
+compressibility = 4.5e-5
+pbc = xyz
+gen_vel = no
+"""
+    
     
     # 파일들 저장
     for name, content in [("em.mdp", em_mdp), ("nvt.mdp", nvt_mdp), 
-                         ("npt.mdp", npt_mdp), ("md.mdp", md_mdp)]:
+                         ("npt.mdp", npt_mdp)]:
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
@@ -1861,12 +1880,12 @@ def restore_original_chain_ids(gromacs_pdb, output_pdb, work_dir):
 
 # ===== 시뮬레이션 실행 함수들 =====
 
-def run_attempt(iteration_dir, prev_gro, prev_cpt, topology, attempt_num, binding_site_residues, enable_cpi=True, long_md=False):
+def run_attempt(iter_dir, prev_gro, prev_cpt, topology, attempt_num, binding_site_residues, enable_cpi=True, long_md=False):
     """
     단일 attempt 실행 - 체크포인트에서 이어서 MD만 수행
     
     Args:
-        iteration_dir: iteration의 디렉토리
+        iter_dir: iteration의 디렉토리
         prev_gro: 이전 .gro 파일 경로
         prev_cpt: 이전 .cpt 파일 경로
         topology: topol.top 파일 경로
@@ -1878,7 +1897,7 @@ def run_attempt(iteration_dir, prev_gro, prev_cpt, topology, attempt_num, bindin
     logger.info(f"Attempt {attempt_num} 시작 {'(긴 MD)' if long_md else ''}")
     
     # attempt 작업 디렉토리 생성
-    attempt_dir = os.path.join(iteration_dir, f"attempt_{attempt_num}")
+    attempt_dir = os.path.join(iter_dir, f"attempt_{attempt_num}")
     ensure_clean_dir(attempt_dir)
     
     # SUMD 사이클 실행 (평형화 없이 MD만)
