@@ -1121,7 +1121,7 @@ def initialize_system_once(work_dir, input_pdb):
         input_pdb: 입력 PDB 파일
         
     Returns:
-        tuple: (equilibrated.gro, equilibrated.cpt, topol.top) 경로
+        tuple: tuple: (equilibrated.gro, None, topol.top, [itp_files])
         
     Raises:
         RuntimeError: 평형화 단계 실패 시
@@ -1252,14 +1252,18 @@ pbc = xyz
     
     shutil.copy(os.path.join(work_dir, "npt.gro"), equilibrated_gro)
 
-
+    # .itp 파일들 수집
+    itp_files = glob.glob(os.path.join(work_dir, "*.itp"))
+    logger.info(f"생성된 .itp 파일: {len(itp_files)}개")
+    for itp in itp_files:
+        logger.debug(f"  - {os.path.basename(itp)}")
     
     logger.info("=== 평형화 완료 ===")
     logger.info(f"평형화 결과: equilibrated.gro")
     
-    return equilibrated_gro, None, topology
+    return equilibrated_gro, None, topology, itp_files
 
-def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_site_residues, enable_cpi=True, long_md=False):
+def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num, binding_site_residues, enable_cpi=True, long_md=False):
     """
     체크포인트에서 이어서 SUMD MD 수행 (연속된 시간)
     """
@@ -1285,22 +1289,42 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, cycle_num, binding_si
         local_prev_cpt = os.path.join(work_dir, "prev.cpt")
         local_topology = os.path.join(work_dir, "topol.top")
         
-        logger.info(f"prev_gro : {prev_gro}, prev_cpt : {prev_cpt}, topology : {topology}")
-        logger.info(f"local_prev_gro : {local_prev_gro}, local_prev_cpt : {local_prev_cpt}, local_topology : {local_topology}")
-        
-        if prev_gro is not None:  # ✓ None 체크 추가
+        # logger.info(f"prev_gro : {prev_gro}, prev_cpt : {prev_cpt}, topology : {topology}")
+        # logger.info(f"local_prev_gro : {local_prev_gro}, local_prev_cpt : {local_prev_cpt}, local_topology : {local_topology}")
+
+        if itp_files:
+            logger.info(f".itp 파일 {len(itp_files)}개 복사 중...")
+            for itp_file in itp_files:
+                dest_itp = os.path.join(work_dir, os.path.basename(itp_file))
+                shutil.copy(itp_file, dest_itp)
+                logger.info(f"  - {os.path.basename(itp_file)}")
+            
+        # ========== 여기부터 한 줄씩 로그 추가 ==========
+        logger.info("STEP 1: GRO 파일 복사 시작")
+        if prev_gro is not None:
             shutil.copy(prev_gro, local_prev_gro)
+            logger.info("STEP 1 완료")
         else:
             raise ValueError("prev_gro is None")
-        if prev_cpt is not None:  # ✓ None 체크 추가
+        
+        logger.info("STEP 2: CPT 파일 체크 시작")
+        if prev_cpt is not None:
+            logger.info("STEP 2-1: CPT 파일 복사 시작")
             shutil.copy(prev_cpt, local_prev_cpt)
-        if topology is not None:  # ✓ None 체크 추가
+            logger.info("STEP 2-1 완료")
+        else:
+            logger.info("STEP 2-2: CPT가 None이므로 복사 건너뜀")
+        
+        logger.info("STEP 3: Topology 파일 복사 시작")
+        if topology is not None:
             shutil.copy(topology, local_topology)
+            logger.info("STEP 3 완료")
         else:
             raise ValueError("topology is None")
         
-        logger.info(f"체크포인트 로드: {os.path.basename(prev_gro)}, {os.path.basename(prev_cpt)}")
-        
+        logger.info("모든 파일 복사 완료")
+        # ========================================
+
         # 1. grompp
         logger.info(f"1/2: MD grompp 실행")
         cpt_option = "-t prev.cpt" if enable_cpi else ""
@@ -1889,7 +1913,7 @@ def restore_original_chain_ids(gromacs_pdb, output_pdb, work_dir):
 
 # ===== 시뮬레이션 실행 함수들 =====
 
-def run_attempt(iter_dir, prev_gro, prev_cpt, topology, attempt_num, binding_site_residues, enable_cpi=True, long_md=False):
+def run_attempt(iter_dir, prev_gro, prev_cpt, topology, itp_files, attempt_num, binding_site_residues, enable_cpi=True, long_md=False):
     """
     단일 attempt 실행 - 체크포인트에서 이어서 MD만 수행
     
@@ -1915,6 +1939,7 @@ def run_attempt(iter_dir, prev_gro, prev_cpt, topology, attempt_num, binding_sit
         prev_gro=prev_gro,
         prev_cpt=prev_cpt,
         topology=topology,
+        itp_files=itp_files,
         cycle_num=attempt_num,
         binding_site_residues=binding_site_residues,
         enable_cpi=enable_cpi,
@@ -2035,7 +2060,7 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
         if iteration_num == 1:
             logger.info("=== Iteration 1: 시스템 초기화 및 평형화 ===")
             try:
-                equilibrated_gro, equilibrated_cpt, topology = initialize_system_once(
+                equilibrated_gro, equilibrated_cpt, topology, itp_files = initialize_system_once(
                     iter_dir, input_pdb
                 )
                 logger.info("평형화 완료 - 이후 모든 attempt는 이 상태에서 시작")
@@ -2068,7 +2093,7 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
         else:
             if prev_equilibrated_state is None:
                 raise ValueError("Iteration 2+ requires prev_equilibrated_state")
-            equilibrated_gro, equilibrated_cpt, topology = prev_equilibrated_state
+            equilibrated_gro, equilibrated_cpt, topology, itp_files = prev_equilibrated_state
             logger.info(f"이전 iteration의 평형 상태 사용: {os.path.basename(equilibrated_gro)}")
             iteration_initial_distance = None  # Iteration 2+는 MD 첫 프레임 사용
         
@@ -2080,6 +2105,7 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
                     prev_gro=equilibrated_gro,
                     prev_cpt=equilibrated_cpt,
                     topology=topology,
+                    itp_files=itp_files,
                     attempt_num=attempt,
                     binding_site_residues=binding_site_residues,
                     enable_cpi=enable_cpi,
