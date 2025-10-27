@@ -2135,7 +2135,7 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
                         "final_result": result,
                         "long_md": long_md,
                         "close_contact_in_iteration": result.get("close_contact_detected", False),
-                        "final_equilibrated_state": (final_gro, final_cpt, topology)
+                        "final_equilibrated_state": (final_gro, final_cpt, topology, itp_files)
                     }
                 else:
                     logger.warning(f"Attempt {attempt} 실패: {result.get('reason', '기울기 조건 불만족')}")
