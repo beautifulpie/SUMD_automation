@@ -1111,46 +1111,55 @@ pbc = xyz ; Apply 3D periodic boundary conditions
 """
     
     # NVT MDP - SD integrator with random seed
-    nvt_mdp = f"""title = Lysozyme NVT equilibration
+    nvt_mdp = f""";title = Lysozyme NVT equilibration
 define = -DPOSRES ; Apply position restraints to protein
+
 ; = Run control =
 integrator = md ; Leap-frog integrator
 dt = {nvt_settings["dt"]}
 nsteps = {nvt_settings["nsteps"]}
+
 ; = Output control =
 nstxout = 1000 ; Write coordinates every 2 ps (controls file size)
 nstvout = 1000 ; Write velocities every 2 ps
 nstenergy = {output_freq["energy"]}
 nstlog = {output_freq["log"]}
 nstxout-compressed = {output_freq["trajectory"]}
+
 ; = Bond/constraints =
 continuation = no ; Fresh dynamics start (not continuing previous run)
 constraint_algorithm = lincs ; LINCS algorithm for constraints
-constraints = h-bonds ; Constrain hydrogen bonds only (recommended;
-change if all-bonds needed)
+constraints = h-bonds ; Constrain hydrogen bonds only (recommended;change if all-bonds needed)
 lincs_iter = 1 ; LINCS iteration count (accuracy)
 lincs_order = 4 ; LINCS order (accuracy, performance trade-off)
+
 ; = Neighbor searching =
 cutoff-scheme nstlist rlist = Verlet ; Verlet neighbor list (default since GROMACS 2020)
 nstlist = 10 ; Neighbor list update every 20 fs (10 * 2 fs)
 rlist = 1.3 ; Neighbor list cutoff distance (nm; recommended)
 rcoulomb = 1.3 ; Coulomb cutoff (nm)
 rvdw = 1.3 ; Van der Waals cutoff (nm)
+
 ; = Electrostatics =
 coulombtype = PME ; Particle Mesh Ewald electrostatics
 pme_order = 4 ; PME interpolation order (cubic)
 fourierspacing = 0.12 ; PME FFT grid spacing (finer grid)
+
 ; = Temperature coupling =
 tcoupl = V-rescale ; Modified Berendsen thermostat
 tc-grps = Protein Non-Protein ; Two coupling groups: Protein and solvent/ions
 tau_t = 0.1 0.1 ; Temperature coupling time constants (ps)
 ref_t = 300 300 ; Reference temperatures (Kelvin)
+
 ; = Pressure coupling =
 pcoupl = no ; No pressure coupling for NVT ensemble
+
 ; = Periodic boundary conditions =
 pbc = xyz ; 3D periodic boundary conditions
+
 ; = Dispersion correction =
 DispCorr = EnerPres ; Dispersion correction for energy and pressure
+
 ; = Velocity generation =
 gen_vel = yes ; Generate initial velocities from Maxwell distribution
 gen_temp = 300 ; Initial temperature (K)
@@ -1158,7 +1167,7 @@ gen_seed = -1 ; Random seed (-1 means use current time for seed)
 """
     
     # NPT MDP - SD integrator with random seed
-    npt_mdp = f"""title = Lysozyme NVT equilibration
+    npt_mdp = f""";title = Lysozyme NVT equilibration
 define = -DPOSRES ; Apply position restraints to protein
 ; = Run control =
 integrator = md ; Leap-frog integrator
@@ -1216,7 +1225,7 @@ gen_vel = no ; Do not generate new velocities; continue from previous run
 """
     
     # NPT2 MDP - SD integrator with random seed
-    npt2_mdp = f"""title = Lysozyme NPT production ; Simulation title for production run
+    npt2_mdp = f""";title = Lysozyme NPT production ; Simulation title for production run
 ; define = -DPOSRES ; Position restraints disabled (commented out)
 
 ; = Run control =
@@ -1278,7 +1287,7 @@ gen_vel = no ; Do not generate new velocities; continue run
     simulation_time = LONG_MD_TIME_NS if long_md else SIMULATION_TIME_NS
     nsteps = int(simulation_time * 1000 / md_settings["dt"])
     
-    md_mdp = f"""title = Lysozyme MD ; Simulation title
+    md_mdp = f""";title = Lysozyme MD ; Simulation title
 integrator = sd ; Use leap-frog integrator (standard MD)
 nsteps = {nsteps}
 dt = 0.002 ; Time step size of 2 fs
