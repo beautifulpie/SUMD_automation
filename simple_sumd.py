@@ -1096,9 +1096,9 @@ pbc = xyz
     nvt_mdp = f"""integrator = sd
 dt = {nvt_settings["dt"]}
 nsteps = {nvt_settings["nsteps"]}
-nstenergy = {output_freq["energy"]//10}
-nstlog = {output_freq["log"]//10}
-nstxout-compressed = {output_freq["trajectory"]//10}
+nstenergy = {output_freq["energy"]}
+nstlog = {output_freq["log"]}
+nstxout-compressed = {output_freq["trajectory"]}
 constraints = h-bonds
 constraint_algorithm = lincs
 cutoff-scheme = Verlet
@@ -1125,9 +1125,9 @@ gen_seed = -1
 integrator = sd
 dt = {npt_settings["dt"]}
 nsteps = {npt_settings["nsteps"]}
-nstenergy = {output_freq["energy"]//10}
-nstlog = {output_freq["log"]//10}
-nstxout-compressed = {output_freq["trajectory"]//10}
+nstenergy = {output_freq["energy"]}
+nstlog = {output_freq["log"]}
+nstxout-compressed = {output_freq["trajectory"]}
 continuation = yes
 constraints = h-bonds
 constraint_algorithm = lincs
@@ -1144,37 +1144,6 @@ ref_t = {npt_settings["temperature"]}
 bd-fric = 0
 ld-seed = -1
 pcoupl = C-rescale
-pcoupltype = isotropic
-tau_p = 2.0
-ref_p = {npt_settings["pressure"]}
-compressibility = 4.5e-5
-pbc = xyz
-gen_vel = no
-"""
-
-# NPT2 MDP - SD integrator with random seed
-    npt2_mdp = f"""integrator = sd
-dt = {npt2_settings["dt"]}
-nsteps = {npt2_settings["nsteps"]}
-nstenergy = {output_freq["energy"]//10}
-nstlog = {output_freq["log"]//10}
-nstxout-compressed = {output_freq["trajectory"]//10}
-continuation = yes
-constraints = h-bonds
-constraint_algorithm = lincs
-cutoff-scheme = Verlet
-ns_type = grid
-nstlist = 10
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-coulombtype = PME
-tc-grps = System
-tau_t = 0.1
-ref_t = {npt_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = Parrinello-Rahman
 pcoupltype = isotropic
 tau_p = 2.0
 ref_p = {npt_settings["pressure"]}
@@ -1217,7 +1186,7 @@ pbc = xyz
     
     # 파일들 저장
     for name, content in [("em.mdp", em_mdp), ("nvt.mdp", nvt_mdp), 
-                         ("npt.mdp", npt_mdp), ("npt2.mdp", npt2_mdp), ("md.mdp", md_mdp)]:
+                         ("npt.mdp", npt_mdp), ("md.mdp", md_mdp)]:
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
@@ -1378,7 +1347,7 @@ pbc = xyz
     cmd = f"gmx grompp -f md.mdp -c npt.gro -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
     if success:
-        timeout = TIMEOUT_LONG_MD if long_md else 3600
+        timeout = TIMEOUT_LONG_MD if long_md else TIMEOUT_GROMACS
         max_retries = 2 if long_md else 0  # Long MD만 재시작 시도
         cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md -ntomp {NTOMP} \
         -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
