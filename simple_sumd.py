@@ -1433,14 +1433,13 @@ nstlog = 1 ; Write log file every step
 ; = Neighbor searching =
 cutoff-scheme = Verlet ; Verlet neighbor list method (default and recommended)
 nstlist = 20 ; Neighbor list update frequency
-rlist = 1.3 ; Cutoff distance increased slightly to avoid excluded atom warnings
-(nm)
+rlist = 1.3 ; Cutoff distance increased slightly to avoid excluded atom warnings (nm)
 ; = Electrostatics and van der Waals =
 coulombtype = PME ; Use Particle Mesh Ewald for long-range electrostatics
 rcoulomb = 1.3 ; Electrostatics cutoff (nm)
 rvdw = 1.3 ; van der Waals cutoff (nm)
 pme_order = 4 ; PME interpolation order (cubic)
-fourierspacing= 0.12 ; PME FFT grid spacing (nm)
+fourierspacing = 0.12 ; PME FFT grid spacing (nm)
 ; = Constraints =
 constraints = none ; No constraints (not required for ion insertion)
 ; = Periodic boundary conditions =

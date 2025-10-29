@@ -40,7 +40,7 @@ TIMEOUT_GROMACS = 999999999999999999999999999       # 기본 GROMACS 명령어 �
 
 # ===== 시스템 설정 =====
 BOX_DISTANCE = 1.0           # 박스 거리 (nm)
-MAX_WARNINGS = 1             # GROMACS 최대 경고 수
+MAX_WARNINGS = 2             # GROMACS 최대 경고 수
 
 # ===== 긴 MD 설정 =====
 CLOSE_DISTANCE_THRESHOLD = 10.0  # 긴 MD 실행 거리 임계값 (Å)
