@@ -1886,6 +1886,7 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
         
         if first_dir is None:
             first_dir = os.path.join(iter_dir, 'attempt_1')
+            first_pdb=current_pdb
         
         # iteration 실행
         with logger.context(iteration=iteration):
@@ -1910,7 +1911,7 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
             else:
                 # 실패 처리 및 재시작 결정
                 if should_restart_simulation(iteration_result):
-                    current_pdb = structure_pdb  # 원점으로 돌아가기
+                    current_pdb = first_pdb  # 원점으로 돌아가기
                     iteration = 0
                     need_long_md = False
                     continue
