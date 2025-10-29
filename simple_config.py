@@ -4,14 +4,13 @@
 MAX_ITERATIONS = 99999999          # 최대 iteration 수
 MAX_ATTEMPTS = 100           # iteration당 최대 attempt 수
 SIMULATION_TIME_NS = 0.3     # MD 시뮬레이션 시간 (ns) - 300ps
-ENABLE_CHAIN_RESTORATION = True
+ENABLE_CHAIN_RESTORATION = False
 
 # 기울기 임계값 (음수여야 채택)
-SLOPE_THRESHOLD = -0.001
+SLOPE_THRESHOLD = -0.00001
 
 # ===== 복합체 분석 설정 =====
 BINDING_SITE_CUTOFF = 4.0        # Binding site 정의 거리 임계값 (Å)
-SEPARATION_DISTANCE = 30.0       # 구조 이격 거리 (Å)
 AUTO_DETECT_LIGAND_RECEPTOR = True  # 자동 ligand/receptor 판별
 
 # ===== Binding site 설정 =====
@@ -19,7 +18,7 @@ BINDING_SITE_RESIDUES = []       # 수동으로 지정된 binding site (빈 리�
 
 # ===== 구조 이격 설정 =====
 ENABLE_MULTI_DIRECTION_SEPARATION = True  # 다방향 이격 활성화
-SEPARATION_DISTANCE = 50.0                # 이격 거리 (Angstrom)
+SEPARATION_DISTANCE = 30.0                # 이격 거리 (Angstrom)
 CONE_ANGLES = [30,60]                           # 기준 벡터에서 기울기 [] 배열 입력.
 ENABLE_RANDOM_DIRECTION=True # 다방향 이격 랜덤 활성화
 ROTATION_STEP = 1                  # 이격 평면 회전 각도 (degrees) ENABLE_RANDOM_DIRECTION False 시 활용
@@ -31,23 +30,23 @@ MAX_ROTATION_VARIANTS = 1           # 최대 회전 변형 수
 STRUCTURE_ROTATION = 120     # 랜덤 최대 각도
 
 # ===== GROMACS 설정 =====
-GPU_ID = "1"                 #  사용할 GPU ID
-MPI_RANKS = "4"              # MPI 랭크 수
-NTOMP = "2"                  # OpenMP 스레드 수
+GPU_ID = "0123"                 #  사용할 GPU ID
+#MPI_RANKS = "1"              # MPI 랭크 수
+#NTOMP = "1"                  # OpenMP 스레드 수
 FORCE_FIELD = "charmm36-jul2022"  # Force field
 WATER_MODEL = "tip3p"        # 물 모델
-TIMEOUT_GROMACS = 3600       # 기본 GROMACS 명령어 타임아웃
-NPME = "1"
+TIMEOUT_GROMACS = 999999999999999999999999999       # 기본 GROMACS 명령어 타임아웃
+#NPME = "1"
 
 # ===== 시스템 설정 =====
-BOX_DISTANCE = 1.5           # 박스 거리 (nm)
+BOX_DISTANCE = 1.0           # 박스 거리 (nm)
 MAX_WARNINGS = 1             # GROMACS 최대 경고 수
 
 # ===== 긴 MD 설정 =====
 CLOSE_DISTANCE_THRESHOLD = 10.0  # 긴 MD 실행 거리 임계값 (Å)
 LONG_MD_TIME_NS = 10.0           # 긴 MD 시뮬레이션 시간 (ns)
 ENABLE_LONG_MD = True            # 긴 MD 기능 활성화
-TIMEOUT_LONG_MD = 72000           # 긴 MD 타임아웃 (초)
+TIMEOUT_LONG_MD = 999999999999999999999999999           # 긴 MD 타임아웃 (초)
 
 # ===== 로그 설정 =====
 VERBOSE = True               # 상세 로그 출력
@@ -57,20 +56,27 @@ KEEP_FAILED_ATTEMPTS = False # 실패한 attempt 디렉토리 보존
 MDP_SETTINGS = {
     "em": {
         "integrator": "steep",
-        "nsteps": 50000,
+        "nsteps": 100000,
         "emtol": 100.0,
         "emstep": 0.01
     },
     "nvt": {
         "integrator": "md",
         "dt": 0.002,
-        "nsteps": 25000,  # 50ps
+        "nsteps": 100000,  # 200ps
         "temperature": 300
     },
     "npt": {
         "integrator": "md", 
         "dt": 0.002,
-        "nsteps": 25000,  # 50ps
+        "nsteps": 300000,  # 600ps
+        "temperature": 300,
+        "pressure": 1.0
+    },
+    "npt2":{
+        "integrator": "md", 
+        "dt": 0.002,
+        "nsteps": 500000,  # 1ns
         "temperature": 300,
         "pressure": 1.0
     },
@@ -90,9 +96,14 @@ MDP_SETTINGS = {
 
 # ===== 출력 빈도 설정 =====
 OUTPUT_FREQUENCY = {
-    "energy": 50,
-    "log": 50, 
-    "trajectory": 50
+    "energy": 100,
+    "log": 100, 
+    "trajectory": 500
+}
+MD_OUTPUT_FREQUENCY = {
+    "energy": 1000,
+    "log": 1000, 
+    "trajectory": 1000
 }
 
 # ===== 시스템 크기별 권장 설정 =====

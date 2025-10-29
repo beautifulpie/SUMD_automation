@@ -1067,6 +1067,7 @@ def create_mdp_files(work_dir, long_md=False):
         npt2_settings = MDP_SETTINGS["npt2"]
         md_settings = MDP_SETTINGS["md"]
         output_freq = OUTPUT_FREQUENCY
+        md_output_freq=MD_OUTPUT_FREQUENCY
         
         if long_md and "long_md" in MDP_SETTINGS:
             md_settings = MDP_SETTINGS["long_md"]
@@ -1077,116 +1078,262 @@ def create_mdp_files(work_dir, long_md=False):
         npt2_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
         md_settings = {"integrator": "sd", "dt": 0.002, "temperature": 300, "pressure": 1.0}
         output_freq = {"energy": 5000, "log": 5000, "trajectory": 5000}
+        md_output_freq={"energy": 5000, "log": 5000, "trajectory": 5000}
     
     # EM MDP
-    em_mdp = f"""integrator = {em_settings["integrator"]}
+    em_mdp = f"""
+; em.mdp -- GROMACS 2025.2
+; Energy minimization step for structural optimization using Steepest Descent method
+; = Run control =
+integrator = {em_settings["integrator"]}
 nsteps = {em_settings["nsteps"]}
 emtol = {em_settings["emtol"]}
 emstep = {em_settings["emstep"]}
-nstlist = 1
-cutoff-scheme = Verlet
-ns_type = grid
-coulombtype = PME
-rcoulomb = 1.0
-rvdw = 1.0
-pbc = xyz
+; = Output control =
+nstxout = 0 ; Do not write coordinates to file
+nstvout = 0 ; Do not write velocities to file
+nstenergy = {output_freq["energy"]}
+nstlog = {output_freq["log"]}
+; = Neighbor searching =
+cutoff-scheme = Verlet ; Verlet neighbor list algorithm (default since GROMACS 2020)
+nstlist = 10 ; Neighbor list update frequency (every 10 steps)
+rlist = 1.3 ; Neighbor list cutoff distance (nm)
+; = Electrostatics and van der Waals =
+coulombtype = PME ; Particle Mesh Ewald for electrostatics
+rcoulomb = 1.3 ; Coulomb cutoff distance (nm)
+rvdw = 1.3 ; van der Waals cutoff distance (nm)
+pme_order = 4 ; PME interpolation order (cubic)
+fourierspacing= 0.12 ; PME grid spacing (nm)
+; = Constraints =
+constraints = h-bonds ; Constrain hydrogen bonds with LINCS (recommended)
+; = Periodic boundary conditions =
+pbc = xyz ; Apply 3D periodic boundary conditions
 """
     
     # NVT MDP - SD integrator with random seed
-    nvt_mdp = f"""integrator = sd
+    nvt_mdp = f"""title = Lysozyme NVT equilibration
+define = -DPOSRES ; Apply position restraints to protein
+; = Run control =
+integrator = md ; Leap-frog integrator
 dt = {nvt_settings["dt"]}
 nsteps = {nvt_settings["nsteps"]}
+; = Output control =
+nstxout = 1000 ; Write coordinates every 2 ps (controls file size)
+nstvout = 1000 ; Write velocities every 2 ps
 nstenergy = {output_freq["energy"]}
 nstlog = {output_freq["log"]}
 nstxout-compressed = {output_freq["trajectory"]}
-constraints = h-bonds
-constraint_algorithm = lincs
-cutoff-scheme = Verlet
-ns_type = grid
-nstlist = 10
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-coulombtype = PME
-tc-grps = System
-tau_t = 0.1
-ref_t = {nvt_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = no
-pbc = xyz
-gen_vel = yes
-gen_temp = {nvt_settings["temperature"]}
-gen_seed = -1
+; = Bond/constraints =
+continuation = no ; Fresh dynamics start (not continuing previous run)
+constraint_algorithm = lincs ; LINCS algorithm for constraints
+constraints = h-bonds ; Constrain hydrogen bonds only (recommended;
+change if all-bonds needed)
+lincs_iter = 1 ; LINCS iteration count (accuracy)
+lincs_order = 4 ; LINCS order (accuracy, performance trade-off)
+; = Neighbor searching =
+cutoff-scheme nstlist rlist = Verlet ; Verlet neighbor list (default since GROMACS 2020)
+nstlist = 10 ; Neighbor list update every 20 fs (10 * 2 fs)
+rlist = 1.3 ; Neighbor list cutoff distance (nm; recommended)
+rcoulomb = 1.3 ; Coulomb cutoff (nm)
+rvdw = 1.3 ; Van der Waals cutoff (nm)
+; = Electrostatics =
+coulombtype = PME ; Particle Mesh Ewald electrostatics
+pme_order = 4 ; PME interpolation order (cubic)
+fourierspacing = 0.12 ; PME FFT grid spacing (finer grid)
+; = Temperature coupling =
+tcoupl = V-rescale ; Modified Berendsen thermostat
+tc-grps = Protein Non-Protein ; Two coupling groups: Protein and solvent/ions
+tau_t = 0.1 0.1 ; Temperature coupling time constants (ps)
+ref_t = 300 300 ; Reference temperatures (Kelvin)
+; = Pressure coupling =
+pcoupl = no ; No pressure coupling for NVT ensemble
+; = Periodic boundary conditions =
+pbc = xyz ; 3D periodic boundary conditions
+; = Dispersion correction =
+DispCorr = EnerPres ; Dispersion correction for energy and pressure
+; = Velocity generation =
+gen_vel = yes ; Generate initial velocities from Maxwell distribution
+gen_temp = 300 ; Initial temperature (K)
+gen_seed = -1 ; Random seed (-1 means use current time for seed)
 """
     
     # NPT MDP - SD integrator with random seed
-    npt_mdp = f"""define = -DPOSRES
-integrator = sd
+    npt_mdp = f"""title = Lysozyme NVT equilibration
+define = -DPOSRES ; Apply position restraints to protein
+; = Run control =
+integrator = md ; Leap-frog integrator
 dt = {npt_settings["dt"]}
 nsteps = {npt_settings["nsteps"]}
+
+; = Output control =
+nstxout = 1000 ; Write coordinates every 2 ps (controls file size)
+nstvout = 1000 ; Write velocities every 2 ps
 nstenergy = {output_freq["energy"]}
 nstlog = {output_freq["log"]}
 nstxout-compressed = {output_freq["trajectory"]}
-continuation = yes
-constraints = h-bonds
-constraint_algorithm = lincs
-cutoff-scheme = Verlet
-ns_type = grid
-nstlist = 10
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-coulombtype = PME
-tc-grps = System
-tau_t = 0.1
-ref_t = {npt_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = C-rescale
-pcoupltype = isotropic
-tau_p = 2.0
-ref_p = {npt_settings["pressure"]}
-compressibility = 4.5e-5
-pbc = xyz
-gen_vel = no
+
+; = Bond/constraints =
+continuation = yes ; Continue from previous run (NVT)
+constraint_algorithm = lincs ; Use LINCS to constrain bonds
+constraints = h-bonds ; Constrain only hydrogen bonds for speed &stability
+lincs_iter = 1 ; LINCS iterations for constraint accuracy
+lincs_order = 4 ; LINCS order; trade-off between accuracy & lincs_order performance
+
+; = Neighbor searching =
+cutoff-scheme = Verlet ; Verlet list for neighbor searching
+nstlist = 10 ; Update neighbor list every 10 steps (20 fs)
+rlist = 1.3 ; Neighbor list cutoff in nm
+rcoulomb = 1.3 ; Coulomb cutoff distance (nm)
+rvdw = 1.3 ; van der Waals cutoff (nm)
+
+; = Electrostatics =
+coulombtype = PME ; Particle Mesh Ewald for long-range electrostatics
+pme_order = 4 ; Cubic interpolation order for PME
+fourierspacing = 0.12 ; FFT grid spacing in nm for PME
+
+; = Temperature coupling =
+tcoupl = V-rescale ; Modified Berendsen thermostat for temperature control
+tc-grps = Protein Non-Protein ; Separate temperature coupling groups
+tau_t = 0.1 0.1 ; Temperature coupling time constants (ps) 
+ref_t = 300 300 ; Target temps (K)
+
+; = Pressure coupling =
+pcoupl = C-rescale ; Use C-rescale barostat for stable pressure control
+pcoupltype = isotropic ; Isotropic box scaling
+tau_p = 2.0 ; Pressure coupling time constant (ps)
+ref_p = 1.0 ; Target pressure (bar)
+compressibility = 4.5e-5 ; Compressibility of water (bar^-1)
+refcoord_scaling = com ; Scale coordinates using center of mass
+
+; = Periodic boundary conditions =
+pbc = xyz ; Enable 3D periodic boundary conditions
+
+; = Dispersion correction =
+DispCorr = EnerPres ; Apply dispersion correction to energy and pressure
+
+; = Velocity generation =
+gen_vel = no ; Do not generate new velocities; continue from previous run
+"""
+    
+    # NPT2 MDP - SD integrator with random seed
+    npt2_mdp = f"""title = Lysozyme NPT production ; Simulation title for production run
+; define = -DPOSRES ; Position restraints disabled (commented out)
+
+; = Run control =
+integrator = md ; Leap-frog integrator
+dt = {npt2_settings["dt"]}
+nsteps = {npt2_settings["nsteps"]}
+
+; = Output control =
+nstxout = 1000 ; Output coordinates every 2 ps
+nstvout = 1000 ; Output velocities every 2 ps
+nstenergy = {output_freq["energy"]}
+nstlog = {output_freq["log"]}
+nstxout-compressed = {output_freq["trajectory"]}
+
+; = Bond/constraints =
+continuation = yes ; Continue from previous run
+constraint_algorithm = lincs ; Constrain bonds with LINCS
+constraints = h-bonds ; Hydrogen bonds constrained
+lincs_iter = 1 ; LINCS iterations
+lincs_order = 4 ; LINCS order for accuracy/performance
+
+; = Neighbor searching =
+cutoff-scheme = Verlet ; Verlet neighbor list
+nstlist = 10 ; Neighbor list updated every 10 steps
+rlist = 1.3 ; Neighbor cutoff (nm)
+rcoulomb = 1.3 ; Coulomb cutoff (nm)
+rvdw = 1.3 ; VdW cutoff (nm)
+
+; = Electrostatics =
+coulombtype = PME ; PME electrostatics
+pme_order = 4 ; PME interpolation order
+fourierspacing = 0.12 ; FFT grid spacing
+
+; = Temperature coupling =
+tcoupl = V-rescale ; Modified Berendsen thermostat
+tc-grps = Protein Non-Protein ; Temperature groups
+tau_t = 0.1 0.1 ; Temperature coupling constants
+ref_t = 300 300 ; Target temps (K)
+
+; = Pressure coupling =
+pcoupl = Parrinello-Rahman ; Use Parrinello-Rahman barostat for accurate NPT
+pcoupltype = isotropic ; Isotropic box scaling
+tau_p = 2.0 ; Pressure coupling time constant
+ref_p = 1.0 ; Target pressure (bar)
+compressibility = 4.5e-5 ; Compressibility of water
+refcoord_scaling = com ; Coordinate scaling by center of mass
+
+; = Periodic boundary conditions =
+pbc = xyz ; 3D periodic boundary conditions
+
+; = Dispersion correction =
+DispCorr = EnerPres ; Dispersion energy & pressure correction
+
+; = Velocity generation =
+gen_vel = no ; Do not generate new velocities; continue run
 """
     
     # MD MDP - SD integrator with random seed
     simulation_time = LONG_MD_TIME_NS if long_md else SIMULATION_TIME_NS
     nsteps = int(simulation_time * 1000 / md_settings["dt"])
     
-    md_mdp = f"""integrator = sd
-dt = {md_settings["dt"]}
+    md_mdp = f"""title = Lysozyme MD ; Simulation title
+integrator = sd ; Use leap-frog integrator (standard MD)
 nsteps = {nsteps}
-nstenergy = {output_freq["energy"]}
-nstlog = {output_freq["log"]}
-nstxout-compressed = {output_freq["trajectory"]}
-tc-grps = System
-tau_t = 0.1
-ref_t = {md_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = C-rescale
-pcoupltype = isotropic
-tau_p = 2.0
-ref_p = {md_settings["pressure"]}
-compressibility = 4.5e-5
-constraints = h-bonds
-constraint_algorithm = LINCS
-cutoff-scheme = Verlet
-nstlist = 40
-ns_type = grid
-coulombtype = PME
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-pbc = xyz
+dt = 0.002 ; Time step size of 2 fs
+
+; Output control
+nstxout-compressed = {md_output_freq["trajectory"]} ; (optimize traj size)
+nstvout = 1000 ; Save velocities every 2 ps
+nstenergy = {md_output_freq["energy"]}
+nstlog = {md_output_freq["log"]}
+
+; Bond parameters
+continuation = yes ; Continue from previous simulation
+constraint_algorithm = lincs ; Use LINCS algorithm for constraints
+constraints = h-bonds ; Constrain hydrogen bonds only (recommended for efficiency and force field compatibility)
+lincs_iter = 1 ; LINCS iterations (accuracy/performance balance)
+lincs_order = 4 ; LINCS order controlling accuracy
+
+; Neighbor searching
+ns_type = verlet ; Use Verlet neighbor list (recommended, especially with GPU)
+nstlist = 20 ; Neighbor list update frequency (every 40 fs = 20 * 2 fs)
+rlist = 1.0 ; Neighbor cutoff distance (nm)
+rcoulomb = 1.0 ; Electrostatic cutoff distance (nm)
+rvdw = 1.0 ; Van der Waals cutoff distance (nm)
+
+; Electrostatics
+coulombtype = PME ; Particle Mesh Ewald for long-range electrostatics
+pme_order = 4 ; PME interpolation order (cubic)
+fourierspacing = 0.16 ; FFT grid spacing for PME (nm)
+
+; Temperature coupling
+tcoupl = V-rescale ; Temperature coupling (thermodynamically stable)
+tc-grps = Protein Non-Protein ; Separate temperature coupling groups for protein and non-protein
+tau_t = 0.1 0.1 ; Time constants for temperature coupling (ps)
+ref_t = 300 300 ; Reference temperature (Kelvin)
+
+; Pressure coupling
+pcoupl = Parrinello-Rahman ; Pressure coupling (NPT ensemble)
+pcoupltype = isotropic ; Isotropic pressure coupling
+tau_p = 2.0 ; Pressure coupling time constant (ps)
+ref_p = 1.0 ; Reference pressure (bar)
+compressibility = 4.5e-5 ; Compressibility of water (bar^-1)
+
+; Periodic boundary conditions
+pbc = xyz ; Three-dimensional periodic boundary conditions
+
+; Dispersion correction
+DispCorr = EnerPres ; Apply dispersion correction to energy and pressure
+
+; Velocity
+gen_vel = no ; Do not generate velocities (continue from previous run)
 """
     
     # 파일들 저장
     for name, content in [("em.mdp", em_mdp), ("nvt.mdp", nvt_mdp), 
-                         ("npt.mdp", npt_mdp), ("md.mdp", md_mdp)]:
+                         ("npt.mdp", npt_mdp), ("npt2.mdp", npt2_mdp), ("md.mdp", md_mdp)]:
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
@@ -1271,17 +1418,36 @@ def run_gromacs_pipeline(work_dir, input_pdb, long_md=False):
     # 4. ions grompp
     log("ions grompp 실행")
     with open(os.path.join(work_dir, "ions.mdp"), "w") as f:
-        f.write("""integrator = steep
-emtol = 1000.0
-emstep = 0.01
-nsteps = 50000
-nstlist = 1
-cutoff-scheme = Verlet
-ns_type = grid
-coulombtype = cutoff
-rcoulomb = 1.0
-rvdw = 1.0
-pbc = xyz
+        f.write("""; ions.mdp -- GROMACS 2025.2
+; = Run control =
+integrator = steep ; Use steepest descent algorithm for energy minimization
+emtol = 1000.0 ; Stop minimization when max force < 1000 kJ/mol/nm
+emstep = 0.01 ; Maximum step size during energy minimization (nm)
+nsteps = 50000 ; Large enough max number of steps (usually converges earlier)
+continuation = yes ; Prevent coordinate constraints issue if starting at zero step
+; = Output control =
+nstxout = 0 ; Do not write coordinates to file
+nstvout = 0 ; Do not write velocities to file
+nstenergy = 1 ; Write energy file every step
+nstlog = 1 ; Write log file every step
+; = Neighbor searching =
+cutoff-scheme = Verlet ; Verlet neighbor list method (default and recommended)
+nstlist = 20 ; Neighbor list update frequency
+rlist = 1.3 ; Cutoff distance increased slightly to avoid excluded atom warnings
+(nm)
+; = Electrostatics and van der Waals =
+coulombtype = PME ; Use Particle Mesh Ewald for long-range electrostatics
+rcoulomb = 1.3 ; Electrostatics cutoff (nm)
+rvdw = 1.3 ; van der Waals cutoff (nm)
+pme_order = 4 ; PME interpolation order (cubic)
+fourierspacing= 0.12 ; PME FFT grid spacing (nm)
+; = Constraints =
+constraints = none ; No constraints (not required for ion insertion)
+; = Periodic boundary conditions =
+pbc = xyz ; Apply 3D periodic boundary conditions
+; = Temperature/Pressure coupling =
+tcoupl = no ; No temperature coupling during ion insertion
+pcoupl = no ; No pressure coupling during ion insertion
 """)
     cmd = f"gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="ions.tpr")
@@ -1307,8 +1473,7 @@ pbc = xyz
     cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="em.tpr")
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm em -ntomp {NTOMP} \
-              -nb gpu -gpu_id {GPU_ID}"
+        cmd = f"gmx mdrun -v -deffnm em"
         success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["em.gro", "em.edr"])
     stages.append({"stage": "em", "success": success})
     if not success:
@@ -1320,8 +1485,7 @@ pbc = xyz
     cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} \
-              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+        cmd = f"gmx mdrun -v -deffnm nvt"
         success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
     stages.append({"stage": "nvt", "success": success})
     if not success:
@@ -1333,10 +1497,21 @@ pbc = xyz
     cmd = f"gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt.tpr")
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt -ntomp {NTOMP} \
-              -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+        cmd = f"gmx mdrun -v -deffnm npt"
         success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt.gro", "npt.cpt"])
     stages.append({"stage": "npt", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # 9. NPT2
+    log("NPT2 실행")
+    cmd =f"gmx grompp -f npt2.mdp -c npt@.gro -t npt@.cpt -r npt@.gro -p topol.top -o npt#.tpr"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt#.tpr")
+    if success:
+        cmd = f"gmx mdrun -v -deffnm npt#"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt#.gro", "npt#.cpt"])
+    stages.append({"stage": "npt2", "success": success})
     if not success:
         stages[-1]["stderr"]=stderr
         return stages
@@ -1344,13 +1519,12 @@ pbc = xyz
     # 9. MD
     md_label = "긴 MD" if long_md else "MD"
     log(f"{md_label} 실행")
-    cmd = f"gmx grompp -f md.mdp -c npt.gro -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
+    cmd = f"gmx grompp -f md.mdp -c npt@.gro -t npt@.cpt -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
     if success:
         timeout = TIMEOUT_LONG_MD if long_md else TIMEOUT_GROMACS
         max_retries = 2 if long_md else 0  # Long MD만 재시작 시도
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md -ntomp {NTOMP} \
-        -nb gpu -gpu_id {GPU_ID} -npme 1 -pme gpu -bonded gpu"
+        cmd = f"gmx mdrun -v -deffnm md"
         if long_md:
             log(f"{md_label} - checkpoint 복구 기능 활성화 (최대 {max_retries}회 재시작)")
             success,returncode, stderr = run_mdrun_with_checkpoint_recovery(
