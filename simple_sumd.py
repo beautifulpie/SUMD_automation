@@ -1886,6 +1886,7 @@ def run_attempt(iter_dir, prev_gro, prev_cpt, topology, itp_files, attempt_num, 
         "initial_distance": distances[0],
         "final_distance": distances[-1],
         "min_distance": min_distance,
+        "cycle_result": cycle_result,
         "long_md_executed": long_md,
         "close_contact_detected": min_distance <= CLOSE_DISTANCE_THRESHOLD
     }
@@ -1969,8 +1970,9 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues,
                 
                 if result["success"]:
                     logger.info("Iteration 성공!")
-                    final_gro = result.get('gro')  # 수정: 'gro_file' → 'gro'
-                    final_cpt = result.get('cpt')  # 수정: 'cpt_file' → 'cpt'
+                    cycle_result=result.get('cycle_result')
+                    final_gro = cycle_result.get('gro')  # 수정: 'gro_file' → 'gro'
+                    final_cpt = cycle_result.get('cpt')  # 수정: 'cpt_file' → 'cpt'
                     
                     return {
                         "iteration": iteration_num,
