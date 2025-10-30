@@ -35,7 +35,7 @@ MPI_RANKS = "2"              # MPI 랭크 수
 NTOMP = "1"                  # OpenMP 스레드 수
 FORCE_FIELD = "charmm36-jul2022"  # Force field
 WATER_MODEL = "tip3p"        # 물 모델
-TIMEOUT_GROMACS = 999999999999999999999999999       # 기본 GROMACS 명령어 타임아웃
+# TIMEOUT_GROMACS = 999999999999999999999999999       # 기본 GROMACS 명령어 타임아웃
 NPME = "1"
 
 # ===== 시스템 설정 =====
@@ -46,7 +46,7 @@ MAX_WARNINGS = 2             # GROMACS 최대 경고 수
 CLOSE_DISTANCE_THRESHOLD = 10.0  # 긴 MD 실행 거리 임계값 (Å)
 LONG_MD_TIME_NS = 10.0           # 긴 MD 시뮬레이션 시간 (ns)
 ENABLE_LONG_MD = True            # 긴 MD 기능 활성화
-TIMEOUT_LONG_MD = 999999999999999999999999999           # 긴 MD 타임아웃 (초)
+# TIMEOUT_LONG_MD = 999999999999999999999999999           # 긴 MD 타임아웃 (초)
 
 # ===== 로그 설정 =====
 VERBOSE = True               # 상세 로그 출력

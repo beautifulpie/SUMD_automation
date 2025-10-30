@@ -1078,7 +1078,7 @@ def initialize_system_once(work_dir, input_pdb):
     logger.info(f"입력 PDB 복사: {os.path.basename(input_pdb)}")
     
     # 1. pdb2gmx
-    logger.info("1/8: pdb2gmx 실행")
+    logger.info("1/9: pdb2gmx 실행")
     cmd = f"echo '1\\n1' | gmx pdb2gmx -f input.pdb -o complex.gro -p topol.top \
           -water {WATER_MODEL} -ff {FORCE_FIELD} -ignh"
     success, returncode, stderr = run_command_with_output_check(
@@ -1088,7 +1088,7 @@ def initialize_system_once(work_dir, input_pdb):
         raise RuntimeError(f"pdb2gmx 실패: {stderr}")
     
     # 2. editconf
-    logger.info("2/8: editconf 실행")
+    logger.info("2/9: editconf 실행")
     cmd = f"gmx editconf -f complex.gro -o box.gro -c -d {BOX_DISTANCE} -bt cubic"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output="box.gro"
@@ -1097,7 +1097,7 @@ def initialize_system_once(work_dir, input_pdb):
         raise RuntimeError(f"editconf 실패: {stderr}")
     
     # 3. solvate
-    logger.info("3/8: solvate 실행")
+    logger.info("3/9: solvate 실행")
     cmd = "gmx solvate -cp box.gro -cs spc216.gro -o solv.gro -p topol.top"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output="solv.gro"
@@ -1106,7 +1106,7 @@ def initialize_system_once(work_dir, input_pdb):
         raise RuntimeError(f"solvate 실패: {stderr}")
     
     # 4. ions grompp
-    log("ions grompp 실행")
+    log("4/9: ions grompp 실행")
     with open(os.path.join(work_dir, "ions.mdp"), "w") as f:
         f.write("""; ions.mdp -- GROMACS 2025.2
 ; = Run control =
@@ -1146,7 +1146,7 @@ pcoupl = no ; No pressure coupling during ion insertion
         raise RuntimeError(f"genion grompp 실패: {stderr}")
     
     # 5. genion
-    log("genion 실행")
+    log("5/9 : genion 실행")
     cmd = "echo 'SOL' | gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output="solv_ions.gro"
@@ -1158,7 +1158,7 @@ pcoupl = no ; No pressure coupling during ion insertion
     create_premd_mdp_files(work_dir)
     
     # 6. EM
-    log("EM 실행")
+    log("6/9 : EM 실행")
     cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output="em.tpr"
@@ -1172,7 +1172,7 @@ pcoupl = no ; No pressure coupling during ion insertion
         raise RuntimeError(f"em 실패: {stderr}")
 
     # 7. NVT
-    log("NVT 실행")
+    log("7/9 : NVT 실행")
     cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
     if success:
@@ -1182,7 +1182,7 @@ pcoupl = no ; No pressure coupling during ion insertion
         raise RuntimeError(f"nvt 실패: {stderr}")
     
     # 8. NPT1
-    log("NPT1 실행")
+    log("8/9 : NPT1 실행")
     cmd = f"gmx grompp -f npt1.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt1.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt1.tpr")
     if success:
@@ -1192,7 +1192,7 @@ pcoupl = no ; No pressure coupling during ion insertion
         raise RuntimeError(f"npt1 실패: {stderr}")
     
     # 9. NPT2
-    log("NPT2 실행")
+    log("9/9 : NPT2 실행")
     cmd =f"gmx grompp -f npt2.mdp -c npt1.gro -t npt1.cpt -r npt1.gro -p topol.top -o npt2.tpr"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt2.tpr")
     if success:
@@ -1294,7 +1294,6 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
         
         # 2. mdrun - enable_cpi에 따라 -cpi 옵션 추가/제거
         logger.info(f"2/2: {md_label} 실행 {'(체크포인트 연속)' if enable_cpi else '(새로 시작)'}")
-        timeout = TIMEOUT_LONG_MD if long_md else TIMEOUT_GROMACS
         max_retries = 2 if long_md else 0
         
         # enable_cpi에 따라 -cpi 옵션 추가 여부 결정 (수정된 부분)
@@ -1306,7 +1305,6 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
             cmd, 
             cwd=work_dir, 
             expected_output=["md.gro", "md.xtc"], 
-            timeout=timeout,
             max_retries=max_retries,
             enable_cpi_recovery=long_md  # Long MD만 자동 복구 활성화
         )
@@ -2242,8 +2240,7 @@ def run_attempt(iter_dir, prev_gro, prev_cpt, topology, itp_files, attempt_num, 
         "close_contact_detected": min_distance <= CLOSE_DISTANCE_THRESHOLD
     }
 
-def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, long_md=False):
-    """단일 iteration 실행 - binding_site_residues 매개변수 추가됨"""
+def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, prev_equilibrated_state=None, long_md=False):
     with logger.context(iteration=iteration_num):
         logger.info(f"Iteration 시작 {'(긴 MD)' if long_md else ''}")
         
@@ -2307,44 +2304,40 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, lon
                 )
                 
                 # JSON에 attempt 결과 저장
-                attempt_file = os.path.join(work_dir, f"iteration_{iteration_num}_attempt_{attempt}.json")
+                attempt_file = os.path.join(iter_dir, f"iteration_{iteration_num}_attempt_{attempt}.json")
                 with open(attempt_file, "w") as f:
                     json.dump(result, f, indent=2, default=str)
                 
                 if result["success"]:
                     logger.info("Iteration 성공!")
+                    final_gro = result.get('gro_file')
+                    final_cpt = result.get('cpt_file')
+                    
+                    # Iteration 2+에서는 채택된 attempt의 MD 첫 번째 프레임 거리 사용
+                    if iteration_initial_distance is None and 'initial_distance' in result:
+                        iteration_initial_distance = result['initial_distance']
+                        logger.info(f"Iteration {iteration_num} 초기 거리 (채택된 MD 첫 프레임): {iteration_initial_distance:.2f}Å")
+                    
                     return {
                         "iteration": iteration_num,
                         "success": True,
                         "attempts_used": attempt,
+                        "iteration_initial_distance": iteration_initial_distance,  # 이제 Iteration 2+에서도 값이 채워짐
                         "final_result": result,
                         "long_md": long_md,
                         "close_contact_in_iteration": result.get("close_contact_detected", False),
                         "final_equilibrated_state": (final_gro, final_cpt, topology, itp_files)
                     }
                 else:
-                    if result.get('stages') and result['stages'] and result['stages'][-1].get('stderr', 0):
-                        logger.error(f"GROMACS 오류로 실패")
-                        return {
-                            "iteration": iteration_num,
-                            "success": False,
-                            "attempts_used": attempt,
-                            "final_result": result,
-                            "long_md": long_md,
-                            "close_contact_in_iteration": False,
-                            "last_stderr": result["stages"][-1]["stderr"],
-                            "failure_type": "gromacs_error"
-                        }
-                    else:
-                        # 기울기 실패 등 다른 이유로 실패 - 다음 attempt 계속 시도
-                        logger.warning("기울기 조건 불만족 - 다음 attempt 시도")
-
+                    logger.warning(f"Attempt {attempt} 실패: {result.get('reason', '기울기 조건 불만족')}")
         
+        # 모든 attempt 실패
         logger.error(f"Iteration 실패: {MAX_ATTEMPTS}번 시도 모두 실패")
         return {
             "iteration": iteration_num,
             "success": False,
             "attempts_used": MAX_ATTEMPTS,
+            "iteration_initial_distance": iteration_initial_distance,  # ⭐ 추가
             "final_result": result,
             "long_md": long_md,
             "close_contact_in_iteration": False,
@@ -2364,6 +2357,7 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
     iteration = 0
     need_long_md = False
     first_dir = None
+    prev_equilibrated_state = None  # (gro, cpt, topology, itp_files) 튜플
     
     while iteration < MAX_ITERATIONS:
         iteration += 1
@@ -2373,12 +2367,18 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
         ensure_clean_dir(iter_dir)
         
         if first_dir is None:
-            first_dir = os.path.join(iter_dir, 'attempt_1')
-            first_pdb=current_pdb
+            first_dir = iter_dir
         
         # iteration 실행
         with logger.context(iteration=iteration):
-            iteration_result = run_iteration(iter_dir, current_pdb, iteration, binding_site_residues, need_long_md)
+            iteration_result = run_iteration(
+                work_dir=iter_dir,
+                input_pdb=current_pdb,
+                iteration_num=iteration,
+                binding_site_residues=binding_site_residues,
+                prev_equilibrated_state=prev_equilibrated_state,
+                long_md=need_long_md
+            )
             structure_results["iterations"].append(iteration_result)
             
             # iteration 결과 JSON 저장
@@ -2387,21 +2387,21 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
                 json.dump(iteration_result, f, indent=2, default=str)
             
             if iteration_result["success"]:
-                # 다음 iteration용 PDB 업데이트
-                next_structure = os.path.join(iter_dir, "next_structure.pdb")
-                current_pdb = prepare_next_iteration_structure(next_structure, first_dir)
+                # 다음 iteration을 위한 평형 상태 업데이트 (gro, cpt, topology)
+                prev_equilibrated_state = iteration_result.get("final_equilibrated_state")
                 
                 # 근접 접촉 검사 및 긴 MD 결정
-                need_long_md = handle_close_contact_detection(iteration_result, need_long_md)
-                if need_long_md and iteration_result.get("close_contact_in_iteration", False):
+                if need_long_md:
                     logger.info("긴 MD 완료, 시뮬레이션 종료")
                     break
+                need_long_md = handle_close_contact_detection(iteration_result, need_long_md)
             else:
                 # 실패 처리 및 재시작 결정
                 if should_restart_simulation(iteration_result):
-                    current_pdb = first_pdb  # 원점으로 돌아가기
+                    current_pdb = original_pdb  # 원점으로 돌아가기
                     iteration = 0
                     need_long_md = False
+                    prev_equilibrated_state = None  # 평형 상태 초기화
                     continue
     
     return first_dir
@@ -2435,22 +2435,46 @@ def should_restart_simulation(iteration_result):
         logger.warning("Iteration 실패 - 재시작")
         return True
 
+
 def save_final_structure(structure_results, struct_dir, first_dir):
-    """최종 구조 저장"""
+    """최종 구조 PDB로 저장 (시각화용)"""
     if not (structure_results["iterations"] and structure_results["iterations"][-1]["success"]):
         return
     
-    final_iter_dir = os.path.join(struct_dir, f'iteration_{len(structure_results["iterations"])}')
-    final_structure = os.path.join(final_iter_dir, "next_structure.pdb")
-    final_output = os.path.join(struct_dir, "final_structure.pdb")
+    final_result = structure_results["iterations"][-1]["final_result"]
+    final_gro = final_result.get("gro_file")
     
-    if os.path.exists(final_structure):
-        success = restore_original_chain_ids(final_structure, final_output, first_dir)
+    if not final_gro or not os.path.exists(final_gro):
+        logger.warning("최종 .gro 파일을 찾을 수 없음")
+        return
+    
+    # 최종 결과를 PDB로 변환 (시각화 및 분석용)
+    final_pdb = os.path.join(struct_dir, "final_structure.pdb")
+    
+    try:
+        # gro를 pdb로 변환
+        cmd = f"echo 'Protein' | gmx trjconv -s {os.path.join(os.path.dirname(final_gro), 'md.tpr')} -f {final_gro} -o {final_pdb}"
+        success, _, stderr = run_command_with_output_check(
+            cmd, struct_dir, expected_output=final_pdb
+        )
+        
         if success:
-            logger.info("최종 구조 저장 완료 (체인 복원됨)")
+            # 체인 복원
+            if ENABLE_CHAIN_RESTORATION:
+                restored_pdb = os.path.join(struct_dir, "final_structure_restored.pdb")
+                success = restore_original_chain_ids(final_pdb, restored_pdb, first_dir)
+                if success:
+                    shutil.move(restored_pdb, final_pdb)
+                    logger.info("최종 구조 저장 완료 (체인 복원됨)")
+                else:
+                    logger.warning("체인 복원 실패, 변환된 구조 사용")
+            
+            logger.info(f"최종 PDB 저장: {final_pdb}")
         else:
-            logger.warning("최종 구조 체인 복원 실패")
-            shutil.copy(final_structure, final_output)
+            logger.warning(f"PDB 변환 실패: {stderr}")
+            
+    except Exception as e:
+        logger.error(f"최종 구조 저장 중 오류: {e}")
 
 def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_queue, process_id):
     """GPU 할당된 단일 구조 시뮬레이션 실행 (배치 처리용) - 리팩토링됨"""
