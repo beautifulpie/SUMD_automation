@@ -43,7 +43,6 @@ except ImportError:
     CLOSE_DISTANCE_THRESHOLD = 10.0
     LONG_MD_TIME_NS = 10.0
     ENABLE_LONG_MD = True
-    TIMEOUT_LONG_MD = 7200
     BOX_DISTANCE = 1.5
     MAX_WARNINGS = 1
     ENABLE_MULTI_DIRECTION_SEPARATION = True
@@ -340,67 +339,51 @@ def extract_target_chains_pdb(input_pdb, output_pdb, chain1, chain2):
     logger.info(f"타겟 체인 추출 완료: {output_pdb} (체인: {chain1}, {chain2})")
     return True
 
-@handle_structure_operations(default_return=(None, None, None), context_info="체인 간 분리축 계산")
-def calculate_separation_axis(pdb_file, chain1, chain2, binding_site_residues):
-    """두 체인 간의 분리 축 계산 (binding site CoM 기준)"""
+@handle_structure_operations(default_return=(None, None), context_info="체인 간 분리축 계산")
+def calculate_separation_axis(pdb_file, chain1, chain2):
+    """두 체인 간의 분리 축 계산"""
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("structure", pdb_file)
     
-    # 1. Ligand CoM 계산
-    ligand_atoms = []
-    ligand_elements = []
+    chain_centers = {}
+    
     for model in structure:
         for chain in model:
-            if chain.id == chain2:  # ligand
+            if chain.id in [chain1, chain2]:
+                atoms = []
+                elements = []
                 for residue in chain:
                     for atom in residue:
-                        ligand_atoms.append(atom.coord)
-                        ligand_elements.append(atom.element)
+                        atoms.append(atom.coord)
+                        elements.append(atom.element)
+                
+                if atoms:
+                    center = calculate_mass_weighted_center(atoms, elements)
+                    if center is not None:
+                        chain_centers[chain.id] = center
     
-    if not ligand_atoms:
-        raise ValueError(f"Ligand 체인 {chain2}의 원자를 찾을 수 없음")
+    if len(chain_centers) == 2:
+        # 순서를 명시적으로 지정
+        receptor_center = chain_centers[chain1]  # receptor
+        ligand_center = chain_centers[chain2]    # ligand
+        
+        # receptor에서 ligand로 향하는 벡터 (멀어지는 방향)
+        separation_vector = ligand_center - receptor_center
+        separation_vector = separation_vector / np.linalg.norm(separation_vector)
+        
+        logger.debug(f"Receptor center: {receptor_center}")
+        logger.debug(f"Ligand center: {ligand_center}")
+        logger.debug(f"분리 방향 (receptor→ligand): {separation_vector}")
+        
+        return separation_vector, chain_centers
     
-    ligand_center = calculate_mass_weighted_center(ligand_atoms, ligand_elements)
-    
-    # 2. Binding site CoM 계산
-    binding_site_atoms = []
-    binding_site_elements = []
-    for model in structure:
-        for chain in model:
-            if chain.id == chain1:  # receptor
-                for residue in chain:
-                    residue_id = residue.get_id()
-                    full_id = f"{residue_id[1]}{residue_id[2].strip()}"
-                    if full_id in binding_site_residues:
-                        for atom in residue:
-                            binding_site_atoms.append(atom.coord)
-                            binding_site_elements.append(atom.element)
-    
-    if not binding_site_atoms:
-        raise ValueError("Binding site 원자를 찾을 수 없음")
-    
-    binding_site_center = calculate_mass_weighted_center(binding_site_atoms, binding_site_elements)
-    
-    # 3. Binding site → Ligand 벡터 (정규화하지 않음!)
-    b2l_vector = ligand_center - binding_site_center
-    current_distance = np.linalg.norm(b2l_vector)
-    
-    # 4. 정규화된 방향 벡터도 함께 반환 (원뿔 생성용)
-    b2l_direction = b2l_vector / current_distance
-    
-    logger.debug(f"Binding site CoM: {binding_site_center}")
-    logger.debug(f"Ligand CoM: {ligand_center}")
-    logger.debug(f"현재 거리: {current_distance:.2f}Å")
-    logger.debug(f"분리 방향: {b2l_direction}")
-    
-    return b2l_direction, b2l_vector, binding_site_center, ligand_center
+    raise ValueError("체인 중심 계산 실패")
 
-def generate_multi_direction_vectors(vector):
+def generate_multi_direction_vectors(base_vector):
     """원뿔형 벡터 생성 - ROTATION_STEP 설정에 따라 분할 각도 조절"""
     vectors = []
-    base_vector=-vector
     
-    # 1. 기준 벡터 (역방향 단위 벡터)
+    # 1. 기준 벡터 (방향 30Å)
     vectors.append(base_vector)
     # log(f"기준 방향 벡터 추가 {base_vector}")
     
@@ -427,8 +410,6 @@ def generate_multi_direction_vectors(vector):
         else:
             num_directions=360 // ROTATION_STEP
 
-        vectors_before = len(vectors)  # 현재 원뿔 시작 전 개수
-
         for i in range(num_directions):
 
             plane_angle_deg = directions[i] if ENABLE_RANDOM_DIRECTION else i * ROTATION_STEP
@@ -446,43 +427,25 @@ def generate_multi_direction_vectors(vector):
             
             vectors.append(cone_vector)
         
-        # 현재 원뿔에서 생성된 벡터 수
-        vectors_added = len(vectors) - vectors_before
-        log(f"원뿔 ({cone_angle_deg}도 반각): {vectors_added}개 방향 벡터 생성")
-        log(f"  - 분할: {ROTATION_STEP}도 간격 ({num_directions}개 방향)" if not ENABLE_RANDOM_DIRECTION else f"  - 랜덤 선택: {num_directions}개 방향")
-    
-    # 최종 요약 (루프 밖)
-    log(f"원뿔형 배치 완료: 총 {len(vectors)}개 방향 벡터 생성")
-    log(f"  - 기준 역방향: 1개")
-    log(f"  - 원뿔 표면 벡터: {len(vectors)-1}개 ({len(CONE_ANGLES)}개 원뿔)")
+        log(f"원뿔형 배치 완료: 총 {len(vectors)}개 방향 벡터 생성")
+        log(f"  - 기준 역방향: 1개")
+        log(f"  - 원뿔 표면 ({cone_angle_deg}도 반각): {len(vectors)-1}개")
+        log(f"  - 분할 각도: {ROTATION_STEP}도 간격 ({num_directions}개 방향)")
     
     return vectors
 
 @handle_file_operations("구조 이격 적용")
-def apply_structure_separation(input_pdb, output_pdb, separation_direction, target_distance, 
-                               chain_to_move, binding_site_center, current_ligand_center):
-    """
-    구조에 이격 적용 - CoM 재계산 없이 직접 이동
-    
-    Args:
-        separation_direction: 이격 방향 (단위 벡터)
-        target_distance: 목표 거리 (Å)
-        binding_site_center: Binding site CoM (이미 계산됨)
-        current_ligand_center: 현재 ligand CoM (이미 계산됨)
-    """
+def apply_structure_separation(input_pdb, output_pdb, separation_vector, distance, chain_to_move):
+    """구조에 이격 적용"""
+
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("structure", input_pdb)
     
-    # 목표 ligand CoM 위치 계산
-    target_ligand_center = binding_site_center + separation_direction * target_distance
+    # 이동할 거리 벡터 계산 (Angstrom -> Angstrom)
+    move_vector = separation_vector * distance
     
-    # 이동 벡터 = 목표 위치 - 현재 위치
-    move_vector = target_ligand_center - current_ligand_center
+    logger.debug(f"체인 {chain_to_move}를 {distance:.1f}Å 이동: {move_vector}")
     
-    logger.debug(f"이동 벡터 크기: {np.linalg.norm(move_vector):.2f}Å")
-    logger.debug(f"목표 거리: {target_distance:.2f}Å")
-    
-    # Ligand 이동
     for model in structure:
         for chain in model:
             if chain.id == chain_to_move:
@@ -490,13 +453,12 @@ def apply_structure_separation(input_pdb, output_pdb, separation_direction, targ
                     for atom in residue:
                         atom.coord = atom.coord + move_vector
     
-    # 저장
+    # 수정된 구조 저장
     io = PDBIO()
     io.set_structure(structure)
     io.save(output_pdb)
     
-    logger.info(f"이격 완료: {output_pdb} (목표: {target_distance:.1f}Å)")
-    
+    logger.info(f"이격된 구조 저장: {output_pdb}")
     return True
 
 def create_rotation_matrix(axis, angle_degrees):
@@ -570,7 +532,7 @@ def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
     variants = []  #[base_pdb] 원본 포함
     
     if not ENABLE_ROTATIONAL_VARIANTS:
-        variants.append(base_pdb)
+        variants.extend(base_pdb)
         logger.info("회전 변형 비활성화됨 (ENABLE_ROTATIONAL_VARIANTS = False)")
         return variants
     
@@ -634,8 +596,8 @@ def generate_structure_variants(base_pdb, output_dir, base_name, chain_to_move):
     logger.info(f"회전 변형 완료: 회전 {variant_count-1}개 = 총 {len(variants)}개")
     return variants
 
-def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir, binding_site_residues):
-    """초기 구조 풀 생성"""
+def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
+    """초기 구조 풀 생성 - 구조 리스트 반환"""
     structure_pool = []
     
     if not ENABLE_MULTI_DIRECTION_SEPARATION:
@@ -660,26 +622,23 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir, binding
                         atom_count = sum(1 for residue in chain for atom in residue)
                         chain_sizes[chain.id] = atom_count
         except:
-            chain_sizes = {chain1: 1000, chain2: 1000}
+            chain_sizes = {chain1: 1000, chain2: 1000}  # 기본값
 
+        # 더 작은 체인 결정
         chain_to_move = chain1 if chain_sizes.get(chain1, 0) <= chain_sizes.get(chain2, 0) else chain2
         logger.info(f"이동할 체인: {chain_to_move} (크기: {chain_sizes.get(chain_to_move, 0)} 원자)")
         chain_to_stay = chain1 if chain_sizes.get(chain1, 0) >= chain_sizes.get(chain2, 0) else chain2
         logger.info(f"고정될 체인: {chain_to_stay} (크기: {chain_sizes.get(chain_to_stay, 0)} 원자)")
     
         
-        # 1단계: 축 계산 (binding site 기준, 정규화하지 않은 벡터)
-        b2l_direction, b2l_vector, binding_site_center, ligand_center = calculate_separation_axis(
-            input_pdb, chain_to_stay, chain_to_move, binding_site_residues
-        )
-        
-        if b2l_direction is None:
+        # 1단계: 분리 축 계산
+        separation_vector, chain_centers = calculate_separation_axis(input_pdb, chain_to_stay, chain_to_move)
+        if separation_vector is None:
             logger.warning("분리 축 계산 실패 - 원본 구조 사용")
             return [input_pdb]
         
-        # 2단계: 다방향 벡터 생성 (원뿔형, 정규화된 방향 벡터 사용)
-        # b2l_direction의 반대 = ligand에서 멀어지는 방향
-        direction_vectors = generate_multi_direction_vectors(b2l_direction)
+        # 2단계: 다방향 벡터 생성 (원뿔형)
+        direction_vectors = generate_multi_direction_vectors(separation_vector)
         
         # 3단계: 각 방향으로 이격된 구조 생성
         base_structures = []
@@ -687,10 +646,8 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir, binding
         for i, direction in enumerate(direction_vectors):
             separated_pdb = os.path.join(pool_dir, format_filename('variant_separation', num=i))
             
-            if apply_structure_separation(
-                input_pdb, separated_pdb, direction, SEPARATION_DISTANCE,
-                chain_to_move, binding_site_center, ligand_center
-            ):
+            if apply_structure_separation(input_pdb, separated_pdb, direction, 
+                                        SEPARATION_DISTANCE, chain_to_move):
                 base_structures.append(separated_pdb)
                 log(f"이격 구조 {i} 생성: {separated_pdb}")
         
@@ -699,7 +656,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir, binding
             variants = generate_structure_variants(base_struct, pool_dir, f"sep{i}", chain_to_move)
             structure_pool.extend(variants)
         
-        logger.info(f"구조 풀 생성 완료: 총 {len(structure_pool)}개 구조")
+        logger.info(f"구조 풀 생성 완료: 이 {len(structure_pool)}개 구조")
         
         # 구조 풀 정보 저장
         pool_info = {
@@ -843,10 +800,7 @@ def process_single_pdb_file(pdb_file, base_output_dir):
             return None
         
         # 구조 풀 생성
-        structure_pool = create_initial_structure_pool(
-            target_pdb, pdb_info['chain1'], pdb_info['chain2'], 
-            pdb_output_dir, binding_info['binding_site_residues']  # binding_site_residues 전달
-        )
+        structure_pool = create_initial_structure_pool(target_pdb, pdb_info['chain1'], pdb_info['chain2'], pdb_output_dir)
         
         # 최종 정보 구성
         complete_pdb_info = {
@@ -993,124 +947,114 @@ def calculate_distance_binding_site(pdb_file, binding_site_residues):
 
 # ===== GROMACS 관련 함수들 =====
 
-def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_output=None, timeout=3600, max_retries=0, enable_cpi_recovery=False):
-    """
-    명령어 실행 및 목적 파일 생성 확인 (checkpoint 복구 기능 포함)
+def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_output=None):
+    """명령어 실행 및 목적 파일 생성 확인"""
+    try:
+        log(f"실행: {cmd}")
+        result = subprocess.run(
+            cmd, shell=True, cwd=cwd, 
+            input=input_text.encode() if input_text else None,
+            capture_output=True, text=True
+        )
+        
+        if result.returncode != 0:
+            log(f"Return code 오류 ({result.returncode}): {result.stderr}")
+            with open(os.path.join(cwd,"error.log"), mode="w") as stream:
+                stream.write(result.stderr)
+            return False, result.returncode, result.stderr
+        
+        if expected_output:
+            if isinstance(expected_output, str):
+                expected_output = [expected_output]
+            
+            for output_file in expected_output:
+                full_path = os.path.join(cwd, output_file) if cwd else output_file
+                if not os.path.exists(full_path):
+                    log(f"목적 파일 생성 실패: {output_file}")
+                    return False, result.returncode, f"목적 파일 생성 실패: {output_file}"
+                elif os.path.getsize(full_path) == 0:
+                    log(f"빈 파일 생성: {output_file}")
+                    return False, result.returncode, f"빈 파일 생성: {output_file}"
+        
+        return True, result.returncode, "Success"
+    except subprocess.TimeoutExpired:
+        log(f"명령어 실행 시간 초과: {cmd}")
+        return False, 1, f"명령어 실행 시간 초과: {cmd}"
+    except Exception as e:
+        log(f"명령어 실행 실패: {e}")
+        return False, 1, f"명령어 실행 실패: {e}"
     
-    Args:
-        cmd: 실행할 명령어
-        cwd: 작업 디렉토리
-        input_text: 표준 입력으로 전달할 텍스트
-        expected_output: 생성되어야 할 파일 (str 또는 list)
-        timeout: 타임아웃 시간 (초)
-        max_retries: 최대 재시도 횟수
-        enable_cpi_recovery: True이면 mdrun -cpi를 통한 자동 재시작
-    
-    Returns:
-        tuple: (success: bool, returncode: int, stderr: str)
-    """
+def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_output=[], max_retries=2, is_long_md=False):
+    """GROMACS mdrun을 checkpoint 복구 기능과 함께 실행"""
     attempt = 0
     
     while attempt <= max_retries:
         try:
-            current_cmd = cmd
-            
-            # 재시도 시 -cpi가 활성화되어 있고 mdrun 명령어면 자동 추가
-            if attempt > 0 and enable_cpi_recovery and 'mdrun' in cmd and '-cpi' not in cmd:
-                current_cmd = cmd + " -cpi"
-                log(f"재시작 시도 {attempt + 1}/{max_retries + 1}: checkpoint 자동 복구 모드")
-            elif attempt > 0:
-                log(f"재시도 {attempt + 1}/{max_retries + 1}")
+            if attempt == 0:
+                # 첫 번째 시도 - 일반 실행
+                log(f"MD 실행 시도 {attempt + 1}/{max_retries + 1}")
+                result = subprocess.run(
+                    cmd, shell=True, cwd=cwd, 
+                    input=input_text.encode() if input_text else None,
+                    capture_output=True, text=True
+                )
             else:
-                log(f"실행: {current_cmd}")
-            
-            result = subprocess.run(
-                current_cmd, shell=True, cwd=cwd, 
-                input=input_text.encode() if input_text else None,
-                capture_output=True, text=True, timeout=timeout
-            )
-            
-            if result.returncode != 0:
-                log(f"Return code 오류 ({result.returncode}): {result.stderr}")
-                if cwd:
-                    with open(os.path.join(cwd, "error.log"), mode="w") as stream:
-                        stream.write(result.stderr)
+                # 재시작 시도 - checkpoint 파일 확인
+                checkpoint_files = []
+                for output_file in expected_output:
+                    base_name = output_file.replace('.gro', '').replace('.xtc', '')
+                    checkpoint_file = os.path.join(cwd, f"{base_name}.cpt")
+                    if os.path.exists(checkpoint_file):
+                        checkpoint_files.append(checkpoint_file)
                 
-                # 재시도가 남아있으면 계속
-                if attempt < max_retries:
-                    attempt += 1
-                    time.sleep(5)
-                    continue
-                else:
-                    return False, result.returncode, result.stderr
-            
-            # 출력 파일 확인
-            if expected_output:
-                if isinstance(expected_output, str):
-                    expected_output = [expected_output]
+                if not checkpoint_files:
+                    log(f"재시작 시도 {attempt}: checkpoint 파일을 찾을 수 없음")
+                    break
                 
+                # checkpoint에서 재시작하는 명령어 구성
+                restart_cmd = cmd + " -cpi"
+                log(f"MD 재시작 시도 {attempt + 1}/{max_retries + 1} (checkpoint에서)")
+                log(f"재시작 명령어: {restart_cmd}")
+                
+                result = subprocess.run(
+                    restart_cmd, shell=True, cwd=cwd,
+                    capture_output=True, text=True
+                )
+            
+            # 실행 결과 확인
+            if result.returncode == 0:
+                # 출력 파일 존재 확인
                 all_files_exist = True
                 for output_file in expected_output:
-                    full_path = os.path.join(cwd, output_file) if cwd else output_file
-                    if not os.path.exists(full_path):
-                        log(f"목적 파일 생성 실패: {output_file}")
-                        all_files_exist = False
-                        break
-                    elif os.path.getsize(full_path) == 0:
-                        log(f"빈 파일 생성: {output_file}")
+                    full_path = os.path.join(cwd, output_file)
+                    if not os.path.exists(full_path) or os.path.getsize(full_path) == 0:
                         all_files_exist = False
                         break
                 
-                if not all_files_exist:
-                    # 재시도가 남아있으면 계속
-                    if attempt < max_retries:
-                        attempt += 1
-                        time.sleep(5)
-                        continue
-                    else:
-                        return False, result.returncode, "목적 파일 생성 실패"
-            
-            # 성공
-            if attempt > 0:
-                log(f"실행 성공 (시도 {attempt + 1}회)")
-            return True, result.returncode, "Success"
+                if all_files_exist:
+                    log(f"MD 실행 성공 (시도 {attempt + 1})")
+                    return True, result.returncode, result.stderr
+                else:
+                    log(f"MD 실행 후 출력 파일 확인 실패 (시도 {attempt + 1})")
+            else:
+                log(f"MD 실행 실패 (시도 {attempt + 1}): Return code {result.returncode}")
+                log(f"Error: {result.stderr}")
             
         except subprocess.TimeoutExpired:
-            log(f"명령어 실행 시간 초과 (시도 {attempt + 1}/{max_retries + 1})")
-            
-            # checkpoint 복구 모드이고 재시도가 남아있으면 계속
-            if enable_cpi_recovery and attempt < max_retries:
-                # checkpoint 파일 확인
-                if cwd and expected_output:
-                    checkpoint_exists = False
-                    for output_file in expected_output:
-                        base_name = output_file.replace('.gro', '').replace('.xtc', '')
-                        checkpoint_file = os.path.join(cwd, f"{base_name}.cpt")
-                        if os.path.exists(checkpoint_file):
-                            checkpoint_exists = True
-                            log(f"Checkpoint 파일 발견: {os.path.basename(checkpoint_file)}")
-                            break
-                    
-                    if checkpoint_exists:
-                        attempt += 1
-                        time.sleep(5)
-                        continue
-                    else:
-                        log("Checkpoint 파일이 없어 재시작 불가")
-                        return False, 1, "타임아웃 및 checkpoint 없음"
-            
-            return False, 1, f"명령어 실행 시간 초과: {cmd}"
-            
+            log(f"MD 실행 시간 초과 (시도 {attempt + 1}/{max_retries + 1})")
+            if is_long_md:
+                log(f"Long MD 시간 초과 - 다음 시도에서 checkpoint 복구 시도")
         except Exception as e:
-            log(f"명령어 실행 실패: {e}")
-            if attempt < max_retries:
-                attempt += 1
-                time.sleep(5)
-                continue
-            else:
-                return False, 1, f"명령어 실행 실패: {e}"
+            log(f"MD 실행 중 예외 발생 (시도 {attempt + 1}): {e}")
+        
+        attempt += 1
+        
+        if attempt <= max_retries:
+            log(f"다음 시도까지 5초 대기...")
+            time.sleep(5)
     
-    return False, 1, "최대 재시도 횟수 초과"
+    log(f"MD 실행 최종 실패: {max_retries + 1}회 시도 모두 실패")
+    return False, result.returncode, result.stderr
 
 def initialize_system_once(work_dir, input_pdb):
     """
@@ -1162,29 +1106,47 @@ def initialize_system_once(work_dir, input_pdb):
         raise RuntimeError(f"solvate 실패: {stderr}")
     
     # 4. ions grompp
-    logger.info("4/8: ions grompp 실행")
+    log("ions grompp 실행")
     with open(os.path.join(work_dir, "ions.mdp"), "w") as f:
-        f.write("""integrator = steep
-emtol = 1000.0
-emstep = 0.01
-nsteps = 50000
-nstlist = 1
-cutoff-scheme = Verlet
-ns_type = grid
-coulombtype = cutoff
-rcoulomb = 1.0
-rvdw = 1.0
-pbc = xyz
+        f.write("""; ions.mdp -- GROMACS 2025.2
+; = Run control =
+integrator = steep ; Use steepest descent algorithm for energy minimization
+emtol = 1000.0 ; Stop minimization when max force < 1000 kJ/mol/nm
+emstep = 0.01 ; Maximum step size during energy minimization (nm)
+nsteps = 50000 ; Large enough max number of steps (usually converges earlier)
+continuation = yes ; Prevent coordinate constraints issue if starting at zero step
+; = Output control =
+nstxout = 0 ; Do not write coordinates to file
+nstvout = 0 ; Do not write velocities to file
+nstenergy = 1 ; Write energy file every step
+nstlog = 1 ; Write log file every step
+; = Neighbor searching =
+cutoff-scheme = Verlet ; Verlet neighbor list method (default and recommended)
+nstlist = 20 ; Neighbor list update frequency
+rlist = 1.3 ; Cutoff distance increased slightly to avoid excluded atom warnings (nm)
+; = Electrostatics and van der Waals =
+coulombtype = PME ; Use Particle Mesh Ewald for long-range electrostatics
+rcoulomb = 1.3 ; Electrostatics cutoff (nm)
+rvdw = 1.3 ; van der Waals cutoff (nm)
+pme_order = 4 ; PME interpolation order (cubic)
+fourierspacing = 0.12 ; PME FFT grid spacing (nm)
+; = Constraints =
+constraints = none ; No constraints (not required for ion insertion)
+; = Periodic boundary conditions =
+pbc = xyz ; Apply 3D periodic boundary conditions
+; = Temperature/Pressure coupling =
+tcoupl = no ; No temperature coupling during ion insertion
+pcoupl = no ; No pressure coupling during ion insertion
 """)
     cmd = f"gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output="ions.tpr"
     )
     if not success:
-        raise RuntimeError(f"ions grompp 실패: {stderr}")
+        raise RuntimeError(f"genion grompp 실패: {stderr}")
     
     # 5. genion
-    logger.info("5/8: genion 실행")
+    log("genion 실행")
     cmd = "echo 'SOL' | gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output="solv_ions.gro"
@@ -1193,64 +1155,57 @@ pbc = xyz
         raise RuntimeError(f"genion 실패: {stderr}")
     
     # MDP 파일들 생성
-    create_premd_mdp_files(work_dir, cpi_option=False, long_md=False)
+    create_premd_mdp_files(work_dir)
     
-    # 6. EM (Energy Minimization)
-    logger.info("6/8: 에너지 최소화 (EM) 실행")
+    # 6. EM
+    log("EM 실행")
     cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output="em.tpr"
     )
-    if not success:
-        raise RuntimeError(f"EM grompp 실패: {stderr}")
-    
-    cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm em -ntomp {NTOMP} \
-          -nb gpu -gpu_id {GPU_ID}"
-    success, returncode, stderr = run_command_with_output_check(
-        cmd, work_dir, expected_output=["em.gro", "em.edr"], timeout=TIMEOUT_GROMACS
-    )
-    if not success:
-        raise RuntimeError(f"EM mdrun 실패: {stderr}")
-    
-    # 7. NVT (Temperature equilibration)
-    logger.info("7/8: NVT 평형화 실행")
+    if success:
+        cmd = f"gmx mdrun -v -deffnm em"
+        success, returncode, stderr = run_command_with_output_check(
+            cmd, work_dir, expected_output=["em.gro", "em.edr"]
+            )
+    else:
+        raise RuntimeError(f"em 실패: {stderr}")
+
+    # 7. NVT
+    log("NVT 실행")
     cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(
-        cmd, work_dir, expected_output="nvt.tpr"
-    )
-    if not success:
-        raise RuntimeError(f"NVT grompp 실패: {stderr}")
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
+    if success:
+        cmd = f"gmx mdrun -v -deffnm nvt"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
+    else:
+        raise RuntimeError(f"nvt 실패: {stderr}")
     
-    cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} \
-          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
-    success, returncode, stderr = run_command_with_output_check(
-        cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"], timeout=TIMEOUT_GROMACS
-    )
-    if not success:
-        raise RuntimeError(f"NVT mdrun 실패: {stderr}")
+    # 8. NPT1
+    log("NPT1 실행")
+    cmd = f"gmx grompp -f npt1.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt1.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt1.tpr")
+    if success:
+        cmd = f"gmx mdrun -v -deffnm npt1"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt1.gro", "npt1.cpt"])
+    else:
+        raise RuntimeError(f"npt1 실패: {stderr}")
     
-    # 8. NPT (Pressure equilibration)
-    logger.info("8/8: NPT 평형화 실행")
-    cmd = f"gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(
-        cmd, work_dir, expected_output="npt.tpr"
-    )
-    if not success:
-        raise RuntimeError(f"NPT grompp 실패: {stderr}")
-    
-    cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt -ntomp {NTOMP} \
-          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
-    success, returncode, stderr = run_command_with_output_check(
-        cmd, work_dir, expected_output="npt.gro", timeout=TIMEOUT_GROMACS
-    )
-    if not success:
-        raise RuntimeError(f"NPT mdrun 실패: {stderr}")
+    # 9. NPT2
+    log("NPT2 실행")
+    cmd =f"gmx grompp -f npt2.mdp -c npt1.gro -t npt1.cpt -r npt1.gro -p topol.top -o npt2.tpr"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt2.tpr")
+    if success:
+        cmd = f"gmx mdrun -v -deffnm npt2"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt2.gro", "npt2.cpt"])
+    else:
+        raise RuntimeError(f"npt2 실패: {stderr}")
     
     # 평형화 결과 파일들 복사
     equilibrated_gro = os.path.join(work_dir, "equilibrated.gro")
     topology = os.path.join(work_dir, "topol.top")
     
-    shutil.copy(os.path.join(work_dir, "npt.gro"), equilibrated_gro)
+    shutil.copy(os.path.join(work_dir, "npt2.gro"), equilibrated_gro)
 
     # .itp 파일들 수집
     itp_files = glob.glob(os.path.join(work_dir, "*.itp"))
@@ -1537,13 +1492,13 @@ def create_md_mdp_files(work_dir, cpi_option=True, long_md=False):
     
     try:
         md_settings = MDP_SETTINGS["md"]
-        output_freq = OUTPUT_FREQUENCY
+        md_output_freq=MD_OUTPUT_FREQUENCY
         
         if long_md and "long_md" in MDP_SETTINGS:
             md_settings = MDP_SETTINGS["long_md"]
     except (NameError, KeyError):
         md_settings = {"integrator": "sd", "dt": 0.002, "temperature": 300, "pressure": 1.0}
-        output_freq = {"energy": 5000, "log": 5000, "trajectory": 5000}
+        md_output_freq={"energy": 5000, "log": 5000, "trajectory": 5000}
 
     continuation_opt = "yes" if cpi_option else "no"
     
@@ -1551,33 +1506,57 @@ def create_md_mdp_files(work_dir, cpi_option=True, long_md=False):
     simulation_time = LONG_MD_TIME_NS if long_md else SIMULATION_TIME_NS
     nsteps = int(simulation_time * 1000 / md_settings["dt"])
     
-    md_mdp = f"""integrator = sd
-dt = {md_settings["dt"]}
+    md_mdp = f""";title = Lysozyme MD ; Simulation title
+integrator = sd ; Use leap-frog integrator (standard MD)
 nsteps = {nsteps}
-nstenergy = {output_freq["energy"]}
-nstlog = {output_freq["log"]}
-nstxout-compressed = {output_freq["trajectory"]}
-continuation = {continuation_opt}
-tc-grps = System
-tau_t = 0.1
-ref_t = {md_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = C-rescale
-pcoupltype = isotropic
-tau_p = 2.0
-ref_p = {md_settings["pressure"]}
-compressibility = 4.5e-5
-constraints = h-bonds
-constraint_algorithm = LINCS
-cutoff-scheme = Verlet
-nstlist = 40
-ns_type = grid
-coulombtype = PME
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-pbc = xyz
+dt = 0.002 ; Time step size of 2 fs
+
+; Output control
+nstxout-compressed = {md_output_freq["trajectory"]} ; (optimize traj size)
+nstvout = 1000 ; Save velocities every 2 ps
+nstenergy = {md_output_freq["energy"]}
+nstlog = {md_output_freq["log"]}
+
+; Bond parameters
+continuation = {continuation_opt} ; Continue from previous simulation
+constraint_algorithm = lincs ; Use LINCS algorithm for constraints
+constraints = h-bonds ; Constrain hydrogen bonds only (recommended for efficiency and force field compatibility)
+lincs_iter = 1 ; LINCS iterations (accuracy/performance balance)
+lincs_order = 4 ; LINCS order controlling accuracy
+
+; Neighbor searching
+ns_type = verlet ; Use Verlet neighbor list (recommended, especially with GPU)
+nstlist = 20 ; Neighbor list update frequency (every 40 fs = 20 * 2 fs)
+rlist = 1.0 ; Neighbor cutoff distance (nm)
+rcoulomb = 1.0 ; Electrostatic cutoff distance (nm)
+rvdw = 1.0 ; Van der Waals cutoff distance (nm)
+
+; Electrostatics
+coulombtype = PME ; Particle Mesh Ewald for long-range electrostatics
+pme_order = 4 ; PME interpolation order (cubic)
+fourierspacing = 0.16 ; FFT grid spacing for PME (nm)
+
+; Temperature coupling
+tcoupl = V-rescale ; Temperature coupling (thermodynamically stable)
+tc-grps = Protein Non-Protein ; Separate temperature coupling groups for protein and non-protein
+tau_t = 0.1 0.1 ; Time constants for temperature coupling (ps)
+ref_t = 300 300 ; Reference temperature (Kelvin)
+
+; Pressure coupling
+pcoupl = Parrinello-Rahman ; Pressure coupling (NPT ensemble)
+pcoupltype = isotropic ; Isotropic pressure coupling
+tau_p = 2.0 ; Pressure coupling time constant (ps)
+ref_p = 1.0 ; Reference pressure (bar)
+compressibility = 4.5e-5 ; Compressibility of water (bar^-1)
+
+; Periodic boundary conditions
+pbc = xyz ; Three-dimensional periodic boundary conditions
+
+; Dispersion correction
+DispCorr = EnerPres ; Apply dispersion correction to energy and pressure
+
+; Velocity
+gen_vel = no ; Do not generate velocities (continue from previous run)
 """
     for name, content in [("md.mdp", md_mdp)]:
         with open(os.path.join(work_dir, name), "w") as f:
@@ -1590,98 +1569,223 @@ def create_premd_mdp_files(work_dir, cpi_option=True, long_md=False):
     try:
         em_settings = MDP_SETTINGS["em"]
         nvt_settings = MDP_SETTINGS["nvt"]
-        npt_settings = MDP_SETTINGS["npt"]
-        md_settings = MDP_SETTINGS["md"]
+        npt1_settings = MDP_SETTINGS["npt1"]
+        npt2_settings = MDP_SETTINGS["npt2"]
         output_freq = OUTPUT_FREQUENCY
         
-        if long_md and "long_md" in MDP_SETTINGS:
-            md_settings = MDP_SETTINGS["long_md"]
     except (NameError, KeyError):
         em_settings = {"integrator": "steep", "nsteps": 50000, "emtol": 1000.0, "emstep": 0.01}
         nvt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300}
-        npt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
-        md_settings = {"integrator": "sd", "dt": 0.002, "temperature": 300, "pressure": 1.0}
+        npt1_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
+        npt2_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
         output_freq = {"energy": 5000, "log": 5000, "trajectory": 5000}
-    
-    continuation_opt = "yes" if cpi_option else "no"
+
     # EM MDP
-    em_mdp = f"""integrator = {em_settings["integrator"]}
+    em_mdp = f"""
+; em.mdp -- GROMACS 2025.2
+; Energy minimization step for structural optimization using Steepest Descent method
+; = Run control =
+integrator = {em_settings["integrator"]}
 nsteps = {em_settings["nsteps"]}
 emtol = {em_settings["emtol"]}
 emstep = {em_settings["emstep"]}
-nstlist = 1
-cutoff-scheme = Verlet
-ns_type = grid
-coulombtype = PME
-rcoulomb = 1.0
-rvdw = 1.0
-pbc = xyz
+; = Output control =
+nstxout = 0 ; Do not write coordinates to file
+nstvout = 0 ; Do not write velocities to file
+nstenergy = {output_freq["energy"]}
+nstlog = {output_freq["log"]}
+; = Neighbor searching =
+cutoff-scheme = Verlet ; Verlet neighbor list algorithm (default since GROMACS 2020)
+nstlist = 10 ; Neighbor list update frequency (every 10 steps)
+rlist = 1.3 ; Neighbor list cutoff distance (nm)
+; = Electrostatics and van der Waals =
+coulombtype = PME ; Particle Mesh Ewald for electrostatics
+rcoulomb = 1.3 ; Coulomb cutoff distance (nm)
+rvdw = 1.3 ; van der Waals cutoff distance (nm)
+pme_order = 4 ; PME interpolation order (cubic)
+fourierspacing= 0.12 ; PME grid spacing (nm)
+; = Constraints =
+constraints = h-bonds ; Constrain hydrogen bonds with LINCS (recommended)
+; = Periodic boundary conditions =
+pbc = xyz ; Apply 3D periodic boundary conditions
 """
     
     # NVT MDP - SD integrator with random seed
-    nvt_mdp = f"""integrator = sd
+    nvt_mdp = f""";title = Lysozyme NVT equilibration
+define = -DPOSRES ; Apply position restraints to protein
+
+; = Run control =
+integrator = md ; Leap-frog integrator
 dt = {nvt_settings["dt"]}
 nsteps = {nvt_settings["nsteps"]}
+
+; = Output control =
+nstxout = 1000 ; Write coordinates every 2 ps (controls file size)
+nstvout = 1000 ; Write velocities every 2 ps
 nstenergy = {output_freq["energy"]}
 nstlog = {output_freq["log"]}
 nstxout-compressed = {output_freq["trajectory"]}
-constraints = h-bonds
-constraint_algorithm = lincs
-cutoff-scheme = Verlet
-ns_type = grid
-nstlist = 10
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-coulombtype = PME
-tc-grps = System
-tau_t = 0.1
-ref_t = {nvt_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = no
-pbc = xyz
-gen_vel = yes
-gen_temp = {nvt_settings["temperature"]}
-gen_seed = -1
+
+; = Bond/constraints =
+continuation = no ; Fresh dynamics start (not continuing previous run)
+constraint_algorithm = lincs ; LINCS algorithm for constraints
+constraints = h-bonds ; Constrain hydrogen bonds only (recommended;change if all-bonds needed)
+lincs_iter = 1 ; LINCS iteration count (accuracy)
+lincs_order = 4 ; LINCS order (accuracy, performance trade-off)
+
+; = Neighbor searching =
+cutoff-scheme nstlist rlist = Verlet ; Verlet neighbor list (default since GROMACS 2020)
+nstlist = 10 ; Neighbor list update every 20 fs (10 * 2 fs)
+rlist = 1.3 ; Neighbor list cutoff distance (nm; recommended)
+rcoulomb = 1.3 ; Coulomb cutoff (nm)
+rvdw = 1.3 ; Van der Waals cutoff (nm)
+
+; = Electrostatics =
+coulombtype = PME ; Particle Mesh Ewald electrostatics
+pme_order = 4 ; PME interpolation order (cubic)
+fourierspacing = 0.12 ; PME FFT grid spacing (finer grid)
+
+; = Temperature coupling =
+tcoupl = V-rescale ; Modified Berendsen thermostat
+tc-grps = Protein Non-Protein ; Two coupling groups: Protein and solvent/ions
+tau_t = 0.1 0.1 ; Temperature coupling time constants (ps)
+ref_t = 300 300 ; Reference temperatures (Kelvin)
+
+; = Pressure coupling =
+pcoupl = no ; No pressure coupling for NVT ensemble
+
+; = Periodic boundary conditions =
+pbc = xyz ; 3D periodic boundary conditions
+
+; = Dispersion correction =
+DispCorr = EnerPres ; Dispersion correction for energy and pressure
+
+; = Velocity generation =
+gen_vel = yes ; Generate initial velocities from Maxwell distribution
+gen_temp = 300 ; Initial temperature (K)
+gen_seed = -1 ; Random seed (-1 means use current time for seed)
 """
     
-    # NPT MDP - SD integrator with random seed
-    npt_mdp = f"""define = -DPOSRES
-integrator = sd
-dt = {npt_settings["dt"]}
-nsteps = {npt_settings["nsteps"]}
+    # NPT1 MDP - SD integrator with random seed
+    npt1_mdp = f""";title = Lysozyme NVT equilibration
+define = -DPOSRES ; Apply position restraints to protein
+; = Run control =
+integrator = md ; Leap-frog integrator
+dt = {npt1_settings["dt"]}
+nsteps = {npt1_settings["nsteps"]}
+
+; = Output control =
+nstxout = 1000 ; Write coordinates every 2 ps (controls file size)
+nstvout = 1000 ; Write velocities every 2 ps
 nstenergy = {output_freq["energy"]}
 nstlog = {output_freq["log"]}
 nstxout-compressed = {output_freq["trajectory"]}
-constraints = h-bonds
-constraint_algorithm = lincs
-refcoord_scaling = com
-cutoff-scheme = Verlet
-ns_type = grid
-nstlist = 10
-rcoulomb = 1.0
-rvdw = 1.0
-DispCorr = EnerPres
-coulombtype = PME
-tc-grps = System
-tau_t = 0.1
-ref_t = {npt_settings["temperature"]}
-bd-fric = 0
-ld-seed = -1
-pcoupl = C-rescale
-pcoupltype = isotropic
-tau_p = 2.0
-ref_p = {npt_settings["pressure"]}
-compressibility = 4.5e-5
-pbc = xyz
-gen_vel = no
+
+; = Bond/constraints =
+continuation = yes ; Continue from previous run (NVT)
+constraint_algorithm = lincs ; Use LINCS to constrain bonds
+constraints = h-bonds ; Constrain only hydrogen bonds for speed &stability
+lincs_iter = 1 ; LINCS iterations for constraint accuracy
+lincs_order = 4 ; LINCS order; trade-off between accuracy & lincs_order performance
+
+; = Neighbor searching =
+cutoff-scheme = Verlet ; Verlet list for neighbor searching
+nstlist = 10 ; Update neighbor list every 10 steps (20 fs)
+rlist = 1.3 ; Neighbor list cutoff in nm
+rcoulomb = 1.3 ; Coulomb cutoff distance (nm)
+rvdw = 1.3 ; van der Waals cutoff (nm)
+
+; = Electrostatics =
+coulombtype = PME ; Particle Mesh Ewald for long-range electrostatics
+pme_order = 4 ; Cubic interpolation order for PME
+fourierspacing = 0.12 ; FFT grid spacing in nm for PME
+
+; = Temperature coupling =
+tcoupl = V-rescale ; Modified Berendsen thermostat for temperature control
+tc-grps = Protein Non-Protein ; Separate temperature coupling groups
+tau_t = 0.1 0.1 ; Temperature coupling time constants (ps) 
+ref_t = 300 300 ; Target temps (K)
+
+; = Pressure coupling =
+pcoupl = C-rescale ; Use C-rescale barostat for stable pressure control
+pcoupltype = isotropic ; Isotropic box scaling
+tau_p = 2.0 ; Pressure coupling time constant (ps)
+ref_p = 1.0 ; Target pressure (bar)
+compressibility = 4.5e-5 ; Compressibility of water (bar^-1)
+refcoord_scaling = com ; Scale coordinates using center of mass
+
+; = Periodic boundary conditions =
+pbc = xyz ; Enable 3D periodic boundary conditions
+
+; = Dispersion correction =
+DispCorr = EnerPres ; Apply dispersion correction to energy and pressure
+
+; = Velocity generation =
+gen_vel = no ; Do not generate new velocities; continue from previous run
 """
     
+    # NPT2 MDP - SD integrator with random seed
+    npt2_mdp = f""";title = Lysozyme NPT production ; Simulation title for production run
+; define = -DPOSRES ; Position restraints disabled (commented out)
+
+; = Run control =
+integrator = md ; Leap-frog integrator
+dt = {npt2_settings["dt"]}
+nsteps = {npt2_settings["nsteps"]}
+
+; = Output control =
+nstxout = 1000 ; Output coordinates every 2 ps
+nstvout = 1000 ; Output velocities every 2 ps
+nstenergy = {output_freq["energy"]}
+nstlog = {output_freq["log"]}
+nstxout-compressed = {output_freq["trajectory"]}
+
+; = Bond/constraints =
+continuation = yes ; Continue from previous run
+constraint_algorithm = lincs ; Constrain bonds with LINCS
+constraints = h-bonds ; Hydrogen bonds constrained
+lincs_iter = 1 ; LINCS iterations
+lincs_order = 4 ; LINCS order for accuracy/performance
+
+; = Neighbor searching =
+cutoff-scheme = Verlet ; Verlet neighbor list
+nstlist = 10 ; Neighbor list updated every 10 steps
+rlist = 1.3 ; Neighbor cutoff (nm)
+rcoulomb = 1.3 ; Coulomb cutoff (nm)
+rvdw = 1.3 ; VdW cutoff (nm)
+
+; = Electrostatics =
+coulombtype = PME ; PME electrostatics
+pme_order = 4 ; PME interpolation order
+fourierspacing = 0.12 ; FFT grid spacing
+
+; = Temperature coupling =
+tcoupl = V-rescale ; Modified Berendsen thermostat
+tc-grps = Protein Non-Protein ; Temperature groups
+tau_t = 0.1 0.1 ; Temperature coupling constants
+ref_t = 300 300 ; Target temps (K)
+
+; = Pressure coupling =
+pcoupl = Parrinello-Rahman ; Use Parrinello-Rahman barostat for accurate NPT
+pcoupltype = isotropic ; Isotropic box scaling
+tau_p = 2.0 ; Pressure coupling time constant
+ref_p = 1.0 ; Target pressure (bar)
+compressibility = 4.5e-5 ; Compressibility of water
+refcoord_scaling = com ; Coordinate scaling by center of mass
+
+; = Periodic boundary conditions =
+pbc = xyz ; 3D periodic boundary conditions
+
+; = Dispersion correction =
+DispCorr = EnerPres ; Dispersion energy & pressure correction
+
+; = Velocity generation =
+gen_vel = no ; Do not generate new velocities; continue run
+"""
     
     # 파일들 저장
     for name, content in [("em.mdp", em_mdp), ("nvt.mdp", nvt_mdp), 
-                         ("npt.mdp", npt_mdp)]:
+                         ("npt1.mdp", npt1_mdp), ("npt2.mdp", npt2_mdp)]:
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
@@ -1730,6 +1834,161 @@ def calculate_slope(distances):
     denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
     
     return numerator / denominator if denominator != 0 else 0.0
+
+def run_gromacs_pipeline(work_dir, input_pdb, long_md=False):
+    """GROMACS 파이프라인 실행"""
+    stages = []
+    
+    # 1. pdb2gmx
+    log("pdb2gmx 실행")
+    cmd = f"echo '1\\n1' | gmx pdb2gmx -f {input_pdb} -o complex.gro -p topol.top \
+          -water {WATER_MODEL} -ff {FORCE_FIELD} -ignh"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["complex.gro", "topol.top"])
+    stages.append({"stage": "pdb2gmx", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # 2. editconf
+    log("editconf 실행")
+    cmd = f"gmx editconf -f complex.gro -o box.gro -c -d {BOX_DISTANCE} -bt cubic"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="box.gro")
+    stages.append({"stage": "editconf", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # 3. solvate
+    log("solvate 실행")
+    cmd = "gmx solvate -cp box.gro -cs spc216.gro -o solv.gro -p topol.top"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="solv.gro")
+    stages.append({"stage": "solvate", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # 4. ions grompp
+    log("ions grompp 실행")
+    with open(os.path.join(work_dir, "ions.mdp"), "w") as f:
+        f.write("""; ions.mdp -- GROMACS 2025.2
+; = Run control =
+integrator = steep ; Use steepest descent algorithm for energy minimization
+emtol = 1000.0 ; Stop minimization when max force < 1000 kJ/mol/nm
+emstep = 0.01 ; Maximum step size during energy minimization (nm)
+nsteps = 50000 ; Large enough max number of steps (usually converges earlier)
+continuation = yes ; Prevent coordinate constraints issue if starting at zero step
+; = Output control =
+nstxout = 0 ; Do not write coordinates to file
+nstvout = 0 ; Do not write velocities to file
+nstenergy = 1 ; Write energy file every step
+nstlog = 1 ; Write log file every step
+; = Neighbor searching =
+cutoff-scheme = Verlet ; Verlet neighbor list method (default and recommended)
+nstlist = 20 ; Neighbor list update frequency
+rlist = 1.3 ; Cutoff distance increased slightly to avoid excluded atom warnings (nm)
+; = Electrostatics and van der Waals =
+coulombtype = PME ; Use Particle Mesh Ewald for long-range electrostatics
+rcoulomb = 1.3 ; Electrostatics cutoff (nm)
+rvdw = 1.3 ; van der Waals cutoff (nm)
+pme_order = 4 ; PME interpolation order (cubic)
+fourierspacing = 0.12 ; PME FFT grid spacing (nm)
+; = Constraints =
+constraints = none ; No constraints (not required for ion insertion)
+; = Periodic boundary conditions =
+pbc = xyz ; Apply 3D periodic boundary conditions
+; = Temperature/Pressure coupling =
+tcoupl = no ; No temperature coupling during ion insertion
+pcoupl = no ; No pressure coupling during ion insertion
+""")
+    cmd = f"gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="ions.tpr")
+    stages.append({"stage": "ions_grompp", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # 5. genion
+    log("genion 실행")
+    cmd = "echo 'SOL' | gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="solv_ions.gro")
+    stages.append({"stage": "genion", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # MDP 파일들 생성
+    create_premd_mdp_files(work_dir, long_md)
+    
+    # 6. EM
+    log("EM 실행")
+    cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="em.tpr")
+    if success:
+        cmd = f"gmx mdrun -v -deffnm em"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["em.gro", "em.edr"])
+    stages.append({"stage": "em", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # 7. NVT
+    log("NVT 실행")
+    cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
+    if success:
+        cmd = f"gmx mdrun -v -deffnm nvt"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
+    stages.append({"stage": "nvt", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # 8. NPT1
+    log("NPT1 실행")
+    cmd = f"gmx grompp -f npt1.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt1.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt1.tpr")
+    if success:
+        cmd = f"gmx mdrun -v -deffnm npt1"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt1.gro", "npt1.cpt"])
+    stages.append({"stage": "npt1", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # 9. NPT2
+    log("NPT2 실행")
+    cmd =f"gmx grompp -f npt2.mdp -c npt1.gro -t npt1.cpt -r npt1.gro -p topol.top -o npt2.tpr"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt2.tpr")
+    if success:
+        cmd = f"gmx mdrun -v -deffnm npt2"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt2.gro", "npt2.cpt"])
+    stages.append({"stage": "npt2", "success": success})
+    if not success:
+        stages[-1]["stderr"]=stderr
+        return stages
+    
+    # 9. MD
+    md_label = "긴 MD" if long_md else "MD"
+    log(f"{md_label} 실행")
+    cmd = f"gmx grompp -f md.mdp -c npt2.gro -t npt2.cpt -op topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
+    if success:
+        max_retries = 2 if long_md else 0  # Long MD만 재시작 시도
+        cmd = f"gmx mdrun -v -deffnm md"
+        if long_md:
+            log(f"{md_label} - checkpoint 복구 기능 활성화 (최대 {max_retries}회 재시작)")
+            success,returncode, stderr = run_mdrun_with_checkpoint_recovery(
+                cmd, work_dir, expected_output=["md.gro", "md.xtc"], max_retries=max_retries, is_long_md=True
+            )
+        else:
+            success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"])
+
+    stages.append({"stage": md_label, "success": success})
+
+    if not success:
+        stages[-1]["stderr"]=stderr
+
+    return stages
 
 # ===== 체인 복원 함수들 =====
 @handle_structure_operations(default_return=[], context_info="원본 체인 순서 추출")
@@ -1911,6 +2170,7 @@ def restore_original_chain_ids(gromacs_pdb, output_pdb, work_dir):
     else:
         return False
 
+
 # ===== 시뮬레이션 실행 함수들 =====
 
 def run_attempt(iter_dir, prev_gro, prev_cpt, topology, itp_files, attempt_num, binding_site_residues, enable_cpi=True, long_md=False):
@@ -1946,110 +2206,44 @@ def run_attempt(iter_dir, prev_gro, prev_cpt, topology, itp_files, attempt_num, 
         long_md=long_md
     )
     
-    # 결과 검증
-    if not cycle_result['success']:
-        logger.error(f"Attempt {attempt_num} 실패: {cycle_result['error']}")
+    # 궤적 분석
+    tpr_file = os.path.join(attempt_dir, "md.tpr")
+    xtc_file = os.path.join(attempt_dir, "md.xtc")
+    
+    distances = extract_distances_from_trajectory(tpr_file, xtc_file, binding_site_residues, attempt_dir)
+    
+    if len(distances) < 2:
+        log(f"Attempt {attempt_num} 실패: 거리 데이터 부족")
         return {
             "attempt": attempt_num,
             "success": False,
-            "reason": cycle_result['error'],
+            "distances": distances,
+            "reason": "insufficient_distance_data",
             "long_md_executed": long_md
         }
     
-    # 거리 및 기울기 분석
-    distances = cycle_result['distances']
-    slope = cycle_result['slope']
-    min_distance = cycle_result['min_distance']
-    
-    # 채택 조건 확인
+    # 기울기 계산
+    slope = calculate_slope(distances)
+    min_distance = min(distances)
     accepted = True if long_md else (slope < SLOPE_THRESHOLD)
     
-    logger.info(f"Attempt {attempt_num} - 기울기: {slope:.6f}, 최소거리: {min_distance:.2f}Å, 채택: {accepted}")
+    log(f"Attempt {attempt_num} - 기울기: {slope:.6f}, 최소거리: {min_distance:.2f}Å, 채택: {accepted}")
+    
     
     return {
         "attempt": attempt_num,
         "success": accepted,
         "distances": distances,
         "slope": slope,
-        "initial_distance": cycle_result['initial_distance'],
-        "final_distance": cycle_result['final_distance'],
+        "initial_distance": distances[0],
+        "final_distance": distances[-1],
         "min_distance": min_distance,
         "long_md_executed": long_md,
-        "close_contact_detected": cycle_result['final_distance'] <= CLOSE_DISTANCE_THRESHOLD,
-        "gro_file": cycle_result['gro'],
-        "cpt_file": cycle_result['cpt'],
-        "topology": topology
+        "close_contact_detected": min_distance <= CLOSE_DISTANCE_THRESHOLD
     }
 
-@handle_analysis_operations("gmx distance를 이용한 거리 측정")
-def extract_distances_from_trajectory_gmx(tpr_file, xtc_file, chain1, chain2, work_dir):
-    """
-    gmx distance를 사용하여 두 체인 간 최소 거리 측정
-    
-    Args:
-        tpr_file: TPR 파일 경로
-        xtc_file: XTC 파일 경로
-        chain1: 첫 번째 체인 ID
-        chain2: 두 번째 체인 ID
-        work_dir: 작업 디렉토리
-        
-    Returns:
-        list: 각 프레임의 거리 리스트 (Angstrom)
-    """
-    logger.info("gmx distance로 체인 간 거리 측정 시작")
-    
-    # 1. 인덱스 파일 생성 (두 체인을 그룹으로)
-    index_file = os.path.join(work_dir, "chains.ndx")
-    
-    # gmx select로 체인별 인덱스 생성
-    cmd_chain1 = f'echo "chain {chain1}" | gmx select -s {tpr_file} -on {index_file} -select "chain {chain1}"'
-    success1, _, stderr1 = run_command_with_output_check(cmd_chain1, work_dir)
-    
-    if not success1:
-        logger.warning(f"체인 {chain1} 인덱스 생성 실패, 대체 방법 시도")
-        # 대체: make_ndx 사용
-        cmd_make_ndx = f'echo -e "chain {chain1}\\nchain {chain2}\\nq\\n" | gmx make_ndx -f {tpr_file} -o {index_file}'
-        success, _, stderr = run_command_with_output_check(cmd_make_ndx, work_dir, expected_output=index_file)
-        if not success:
-            raise RuntimeError(f"인덱스 파일 생성 실패: {stderr}")
-    
-    # 2. gmx distance 실행
-    distance_xvg = os.path.join(work_dir, "distance.xvg")
-    
-    # 두 체인 간 최소 거리 계산
-    cmd_distance = f'echo -e "chain_{chain1}\\nchain_{chain2}\\n" | gmx distance -s {tpr_file} -f {xtc_file} -n {index_file} -oav {distance_xvg} -tu ns'
-    
-    success, _, stderr = run_command_with_output_check(cmd_distance, work_dir, expected_output=distance_xvg)
-    
-    if not success:
-        logger.warning("gmx distance 실패, 기존 방식으로 폴백")
-        raise RuntimeError(f"gmx distance 실패: {stderr}")
-    
-    # 3. XVG 파일에서 거리 데이터 파싱
-    distances = []
-    
-    with open(distance_xvg, 'r') as f:
-        for line in f:
-            line = line.strip()
-            # 주석과 빈 줄 건너뛰기
-            if line.startswith('#') or line.startswith('@') or not line:
-                continue
-            
-            parts = line.split()
-            if len(parts) >= 2:
-                try:
-                    # 두 번째 컬럼이 거리 (nm 단위)
-                    distance_nm = float(parts[1])
-                    distance_angstrom = distance_nm * 10.0  # nm -> Angstrom
-                    distances.append(distance_angstrom)
-                except ValueError:
-                    continue
-    
-    logger.info(f"거리 측정 완료: {len(distances)}개 프레임, 범위 {min(distances):.2f}~{max(distances):.2f}Å")
-    
-    return distances
-
-def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, prev_equilibrated_state=None, long_md=False):
+def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, long_md=False):
+    """단일 iteration 실행 - binding_site_residues 매개변수 추가됨"""
     with logger.context(iteration=iteration_num):
         logger.info(f"Iteration 시작 {'(긴 MD)' if long_md else ''}")
         
@@ -2113,40 +2307,44 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
                 )
                 
                 # JSON에 attempt 결과 저장
-                attempt_file = os.path.join(iter_dir, f"iteration_{iteration_num}_attempt_{attempt}.json")
+                attempt_file = os.path.join(work_dir, f"iteration_{iteration_num}_attempt_{attempt}.json")
                 with open(attempt_file, "w") as f:
                     json.dump(result, f, indent=2, default=str)
                 
                 if result["success"]:
                     logger.info("Iteration 성공!")
-                    final_gro = result.get('gro_file')
-                    final_cpt = result.get('cpt_file')
-                    
-                    # Iteration 2+에서는 채택된 attempt의 MD 첫 번째 프레임 거리 사용
-                    if iteration_initial_distance is None and 'initial_distance' in result:
-                        iteration_initial_distance = result['initial_distance']
-                        logger.info(f"Iteration {iteration_num} 초기 거리 (채택된 MD 첫 프레임): {iteration_initial_distance:.2f}Å")
-                    
                     return {
                         "iteration": iteration_num,
                         "success": True,
                         "attempts_used": attempt,
-                        "iteration_initial_distance": iteration_initial_distance,  # 이제 Iteration 2+에서도 값이 채워짐
                         "final_result": result,
                         "long_md": long_md,
                         "close_contact_in_iteration": result.get("close_contact_detected", False),
                         "final_equilibrated_state": (final_gro, final_cpt, topology, itp_files)
                     }
                 else:
-                    logger.warning(f"Attempt {attempt} 실패: {result.get('reason', '기울기 조건 불만족')}")
+                    if result.get('stages') and result['stages'] and result['stages'][-1].get('stderr', 0):
+                        logger.error(f"GROMACS 오류로 실패")
+                        return {
+                            "iteration": iteration_num,
+                            "success": False,
+                            "attempts_used": attempt,
+                            "final_result": result,
+                            "long_md": long_md,
+                            "close_contact_in_iteration": False,
+                            "last_stderr": result["stages"][-1]["stderr"],
+                            "failure_type": "gromacs_error"
+                        }
+                    else:
+                        # 기울기 실패 등 다른 이유로 실패 - 다음 attempt 계속 시도
+                        logger.warning("기울기 조건 불만족 - 다음 attempt 시도")
+
         
-        # 모든 attempt 실패
         logger.error(f"Iteration 실패: {MAX_ATTEMPTS}번 시도 모두 실패")
         return {
             "iteration": iteration_num,
             "success": False,
             "attempts_used": MAX_ATTEMPTS,
-            "iteration_initial_distance": iteration_initial_distance,  # ⭐ 추가
             "final_result": result,
             "long_md": long_md,
             "close_contact_in_iteration": False,
@@ -2166,7 +2364,6 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
     iteration = 0
     need_long_md = False
     first_dir = None
-    prev_equilibrated_state = None  # (gro, cpt, topology) 튜플
     
     while iteration < MAX_ITERATIONS:
         iteration += 1
@@ -2176,18 +2373,12 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
         ensure_clean_dir(iter_dir)
         
         if first_dir is None:
-            first_dir = iter_dir
+            first_dir = os.path.join(iter_dir, 'attempt_1')
+            first_pdb=current_pdb
         
         # iteration 실행
         with logger.context(iteration=iteration):
-            iteration_result = run_iteration(
-                work_dir=iter_dir,
-                input_pdb=current_pdb,
-                iteration_num=iteration,
-                binding_site_residues=binding_site_residues,
-                prev_equilibrated_state=prev_equilibrated_state,
-                long_md=need_long_md
-            )
+            iteration_result = run_iteration(iter_dir, current_pdb, iteration, binding_site_residues, need_long_md)
             structure_results["iterations"].append(iteration_result)
             
             # iteration 결과 JSON 저장
@@ -2196,21 +2387,21 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
                 json.dump(iteration_result, f, indent=2, default=str)
             
             if iteration_result["success"]:
-                # 다음 iteration을 위한 평형 상태 업데이트 (gro, cpt, topology)
-                prev_equilibrated_state = iteration_result.get("final_equilibrated_state")
+                # 다음 iteration용 PDB 업데이트
+                next_structure = os.path.join(iter_dir, "next_structure.pdb")
+                current_pdb = prepare_next_iteration_structure(next_structure, first_dir)
                 
                 # 근접 접촉 검사 및 긴 MD 결정
-                if need_long_md:
+                need_long_md = handle_close_contact_detection(iteration_result, need_long_md)
+                if need_long_md and iteration_result.get("close_contact_in_iteration", False):
                     logger.info("긴 MD 완료, 시뮬레이션 종료")
                     break
-                need_long_md = handle_close_contact_detection(iteration_result, need_long_md)
             else:
                 # 실패 처리 및 재시작 결정
                 if should_restart_simulation(iteration_result):
-                    current_pdb = original_pdb  # 원점으로 돌아가기
+                    current_pdb = first_pdb  # 원점으로 돌아가기
                     iteration = 0
                     need_long_md = False
-                    prev_equilibrated_state = None  # 평형 상태 초기화
                     continue
     
     return first_dir
@@ -2223,7 +2414,9 @@ def handle_close_contact_detection(iteration_result, current_need_long_md):
     if iteration_result.get("close_contact_in_iteration", False):
         if not current_need_long_md:
             logger.info("근접 접촉 감지! 긴 MD 예정")
-        return True  # long MD return
+            return True
+        else:
+            return True  # 이미 긴 MD 모드
     
     return False
 
@@ -2243,44 +2436,21 @@ def should_restart_simulation(iteration_result):
         return True
 
 def save_final_structure(structure_results, struct_dir, first_dir):
-    """최종 구조 PDB로 저장 (시각화용)"""
+    """최종 구조 저장"""
     if not (structure_results["iterations"] and structure_results["iterations"][-1]["success"]):
         return
     
-    final_result = structure_results["iterations"][-1]["final_result"]
-    final_gro = final_result.get("gro_file")
+    final_iter_dir = os.path.join(struct_dir, f'iteration_{len(structure_results["iterations"])}')
+    final_structure = os.path.join(final_iter_dir, "next_structure.pdb")
+    final_output = os.path.join(struct_dir, "final_structure.pdb")
     
-    if not final_gro or not os.path.exists(final_gro):
-        logger.warning("최종 .gro 파일을 찾을 수 없음")
-        return
-    
-    # 최종 결과를 PDB로 변환 (시각화 및 분석용)
-    final_pdb = os.path.join(struct_dir, "final_structure.pdb")
-    
-    try:
-        # gro를 pdb로 변환
-        cmd = f"echo 'Protein' | gmx trjconv -s {os.path.join(os.path.dirname(final_gro), 'md.tpr')} -f {final_gro} -o {final_pdb}"
-        success, _, stderr = run_command_with_output_check(
-            cmd, struct_dir, expected_output=final_pdb
-        )
-        
+    if os.path.exists(final_structure):
+        success = restore_original_chain_ids(final_structure, final_output, first_dir)
         if success:
-            # 체인 복원
-            if ENABLE_CHAIN_RESTORATION:
-                restored_pdb = os.path.join(struct_dir, "final_structure_restored.pdb")
-                success = restore_original_chain_ids(final_pdb, restored_pdb, first_dir)
-                if success:
-                    shutil.move(restored_pdb, final_pdb)
-                    logger.info("최종 구조 저장 완료 (체인 복원됨)")
-                else:
-                    logger.warning("체인 복원 실패, 변환된 구조 사용")
-            
-            logger.info(f"최종 PDB 저장: {final_pdb}")
+            logger.info("최종 구조 저장 완료 (체인 복원됨)")
         else:
-            logger.warning(f"PDB 변환 실패: {stderr}")
-            
-    except Exception as e:
-        logger.error(f"최종 구조 저장 중 오류: {e}")
+            logger.warning("최종 구조 체인 복원 실패")
+            shutil.copy(final_structure, final_output)
 
 def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_queue, process_id):
     """GPU 할당된 단일 구조 시뮬레이션 실행 (배치 처리용) - 리팩토링됨"""
@@ -2312,7 +2482,7 @@ def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_q
         structure_results = initialize_structure_results(pdb_code, structure_name, structure_pdb, assigned_gpu, process_id)
         
         # 모든 iteration 실행
-        first_dir = execute_structure_iterations(structure_pdb, struct_dir, binding_site_residues, structure_results, structure_pdb)
+        first_dir = execute_structure_iterations(structure_pdb, struct_dir, binding_site_residues, structure_results)
         
         # 결과 마무리
         finalize_structure_results(structure_results, struct_dir, first_dir)
