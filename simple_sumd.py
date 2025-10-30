@@ -649,7 +649,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
             if apply_structure_separation(input_pdb, separated_pdb, direction, 
                                         SEPARATION_DISTANCE, chain_to_move):
                 base_structures.append(separated_pdb)
-                log(f"이격 구조 {i} 생성: {separated_pdb}")
+                logger.info(f"이격 구조 {i} 생성: {separated_pdb}")
         
         # 4단계: 각 이격 구조에 대해 회전 변형 생성
         for i, base_struct in enumerate(base_structures):
@@ -901,7 +901,7 @@ def calculate_mass_weighted_center(atoms_coords, atom_types):
 
         return weighted_coords
     except Exception as e:
-        log(f"질량 가중 중심 계산 실패 {e}")
+        logger.error(f"질량 가중 중심 계산 실패 {e}")
         return weighted_coords
 
 def calculate_distance_binding_site(pdb_file, binding_site_residues):
@@ -910,7 +910,7 @@ def calculate_distance_binding_site(pdb_file, binding_site_residues):
         parser = PDBParser(QUIET=True)
         structure = parser.get_structure("s", pdb_file)
         if structure is None:
-            log(f"PDB 구조가 None: {pdb_file}")
+            logger.error(f"PDB 구조가 None: {pdb_file}")
             raise
 
         for model in structure:
@@ -950,7 +950,7 @@ def calculate_distance_binding_site(pdb_file, binding_site_residues):
 def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_output=None):
     """명령어 실행 및 목적 파일 생성 확인"""
     try:
-        log(f"실행: {cmd}")
+        logger.info(f"실행: {cmd}")
         result = subprocess.run(
             cmd, shell=True, cwd=cwd, 
             input=input_text.encode() if input_text else None,
@@ -958,7 +958,7 @@ def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_outpu
         )
         
         if result.returncode != 0:
-            log(f"Return code 오류 ({result.returncode}): {result.stderr}")
+            logger.error(f"Return code 오류 ({result.returncode}): {result.stderr}")
             with open(os.path.join(cwd,"error.log"), mode="w") as stream:
                 stream.write(result.stderr)
             return False, result.returncode, result.stderr
@@ -970,91 +970,19 @@ def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_outpu
             for output_file in expected_output:
                 full_path = os.path.join(cwd, output_file) if cwd else output_file
                 if not os.path.exists(full_path):
-                    log(f"목적 파일 생성 실패: {output_file}")
+                    logger.error(f"목적 파일 생성 실패: {output_file}")
                     return False, result.returncode, f"목적 파일 생성 실패: {output_file}"
                 elif os.path.getsize(full_path) == 0:
-                    log(f"빈 파일 생성: {output_file}")
+                    logger.error(f"빈 파일 생성: {output_file}")
                     return False, result.returncode, f"빈 파일 생성: {output_file}"
         
         return True, result.returncode, "Success"
     except subprocess.TimeoutExpired:
-        log(f"명령어 실행 시간 초과: {cmd}")
+        logger.error(f"명령어 실행 시간 초과: {cmd}")
         return False, 1, f"명령어 실행 시간 초과: {cmd}"
     except Exception as e:
-        log(f"명령어 실행 실패: {e}")
+        logger.error(f"명령어 실행 실패: {e}")
         return False, 1, f"명령어 실행 실패: {e}"
-    
-def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_output=[], max_retries=2, is_long_md=False):
-    """GROMACS mdrun을 checkpoint 복구 기능과 함께 실행"""
-    attempt = 0
-    
-    while attempt <= max_retries:
-        try:
-            if attempt == 0:
-                # 첫 번째 시도 - 일반 실행
-                log(f"MD 실행 시도 {attempt + 1}/{max_retries + 1}")
-                result = subprocess.run(
-                    cmd, shell=True, cwd=cwd, 
-                    input=input_text.encode() if input_text else None,
-                    capture_output=True, text=True
-                )
-            else:
-                # 재시작 시도 - checkpoint 파일 확인
-                checkpoint_files = []
-                for output_file in expected_output:
-                    base_name = output_file.replace('.gro', '').replace('.xtc', '')
-                    checkpoint_file = os.path.join(cwd, f"{base_name}.cpt")
-                    if os.path.exists(checkpoint_file):
-                        checkpoint_files.append(checkpoint_file)
-                
-                if not checkpoint_files:
-                    log(f"재시작 시도 {attempt}: checkpoint 파일을 찾을 수 없음")
-                    break
-                
-                # checkpoint에서 재시작하는 명령어 구성
-                restart_cmd = cmd + " -cpi"
-                log(f"MD 재시작 시도 {attempt + 1}/{max_retries + 1} (checkpoint에서)")
-                log(f"재시작 명령어: {restart_cmd}")
-                
-                result = subprocess.run(
-                    restart_cmd, shell=True, cwd=cwd,
-                    capture_output=True, text=True
-                )
-            
-            # 실행 결과 확인
-            if result.returncode == 0:
-                # 출력 파일 존재 확인
-                all_files_exist = True
-                for output_file in expected_output:
-                    full_path = os.path.join(cwd, output_file)
-                    if not os.path.exists(full_path) or os.path.getsize(full_path) == 0:
-                        all_files_exist = False
-                        break
-                
-                if all_files_exist:
-                    log(f"MD 실행 성공 (시도 {attempt + 1})")
-                    return True, result.returncode, result.stderr
-                else:
-                    log(f"MD 실행 후 출력 파일 확인 실패 (시도 {attempt + 1})")
-            else:
-                log(f"MD 실행 실패 (시도 {attempt + 1}): Return code {result.returncode}")
-                log(f"Error: {result.stderr}")
-            
-        except subprocess.TimeoutExpired:
-            log(f"MD 실행 시간 초과 (시도 {attempt + 1}/{max_retries + 1})")
-            if is_long_md:
-                log(f"Long MD 시간 초과 - 다음 시도에서 checkpoint 복구 시도")
-        except Exception as e:
-            log(f"MD 실행 중 예외 발생 (시도 {attempt + 1}): {e}")
-        
-        attempt += 1
-        
-        if attempt <= max_retries:
-            log(f"다음 시도까지 5초 대기...")
-            time.sleep(5)
-    
-    log(f"MD 실행 최종 실패: {max_retries + 1}회 시도 모두 실패")
-    return False, result.returncode, result.stderr
 
 def initialize_system_once(work_dir, input_pdb):
     """
@@ -1106,7 +1034,7 @@ def initialize_system_once(work_dir, input_pdb):
         raise RuntimeError(f"solvate 실패: {stderr}")
     
     # 4. ions grompp
-    log("4/9: ions grompp 실행")
+    logger.info("4/9: ions grompp 실행")
     with open(os.path.join(work_dir, "ions.mdp"), "w") as f:
         f.write("""; ions.mdp -- GROMACS 2025.2
 ; = Run control =
@@ -1146,7 +1074,7 @@ pcoupl = no ; No pressure coupling during ion insertion
         raise RuntimeError(f"genion grompp 실패: {stderr}")
     
     # 5. genion
-    log("5/9 : genion 실행")
+    logger.info("5/9 : genion 실행")
     cmd = "echo 'SOL' | gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output="solv_ions.gro"
@@ -1158,7 +1086,7 @@ pcoupl = no ; No pressure coupling during ion insertion
     create_premd_mdp_files(work_dir)
     
     # 6. EM
-    log("6/9 : EM 실행")
+    logger.info("6/9 : EM 실행")
     cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(
         cmd, work_dir, expected_output="em.tpr"
@@ -1173,7 +1101,7 @@ pcoupl = no ; No pressure coupling during ion insertion
         raise RuntimeError(f"em 실패: {stderr}")
 
     # 7. NVT
-    log("7/9 : NVT 실행")
+    logger.info("7/9 : NVT 실행")
     cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
     if success:
@@ -1184,7 +1112,7 @@ pcoupl = no ; No pressure coupling during ion insertion
         raise RuntimeError(f"nvt 실패: {stderr}")
     
     # 8. NPT1
-    log("8/9 : NPT1 실행")
+    logger.info("8/9 : NPT1 실행")
     cmd = f"gmx grompp -f npt1.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt1.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt1.tpr")
     if success:
@@ -1195,7 +1123,7 @@ pcoupl = no ; No pressure coupling during ion insertion
         raise RuntimeError(f"npt1 실패: {stderr}")
     
     # 9. NPT2
-    log("9/9 : NPT2 실행")
+    logger.info("9/9 : NPT2 실행")
     cmd =f"gmx grompp -f npt2.mdp -c npt1.gro -t npt1.cpt -r npt1.gro -p topol.top -o npt2.tpr"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt2.tpr")
     if success:
@@ -1636,7 +1564,7 @@ lincs_iter = 1 ; LINCS iteration count (accuracy)
 lincs_order = 4 ; LINCS order (accuracy, performance trade-off)
 
 ; = Neighbor searching =
-cutoff-scheme nstlist rlist = Verlet ; Verlet neighbor list (default since GROMACS 2020)
+cutoff-scheme = Verlet ; Verlet neighbor list (default since GROMACS 2020)
 nstlist = 10 ; Neighbor list update every 20 fs (10 * 2 fs)
 rlist = 1.3 ; Neighbor list cutoff distance (nm; recommended)
 rcoulomb = 1.3 ; Coulomb cutoff (nm)
@@ -2355,7 +2283,7 @@ def run_structure_simulation_with_gpu_batch(structure_info, gpu_queue, results_q
         structure_results = initialize_structure_results(pdb_code, structure_name, structure_pdb, assigned_gpu, process_id)
         
         # 모든 iteration 실행
-        first_dir = execute_structure_iterations(structure_pdb, struct_dir, binding_site_residues, structure_results)
+        first_dir = execute_structure_iterations(structure_pdb, struct_dir, binding_site_residues, structure_results, structure_pdb)
         
         # 결과 마무리
         finalize_structure_results(structure_results, struct_dir, first_dir)

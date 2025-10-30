@@ -56,7 +56,7 @@ KEEP_FAILED_ATTEMPTS = False # 실패한 attempt 디렉토리 보존
 MDP_SETTINGS = {
     "em": {
         "integrator": "steep",
-        "nsteps": 100000,
+        "nsteps": 200000,
         "emtol": 100.0,
         "emstep": 0.01
     },
