@@ -1062,7 +1062,7 @@ def create_mdp_files(work_dir, long_md=False):
     try:
         em_settings = MDP_SETTINGS["em"]
         nvt_settings = MDP_SETTINGS["nvt"] 
-        npt_settings = MDP_SETTINGS["npt"]
+        npt1_settings = MDP_SETTINGS["npt1"]
         npt2_settings = MDP_SETTINGS["npt2"]
         md_settings = MDP_SETTINGS["md"]
         output_freq = OUTPUT_FREQUENCY
@@ -1073,7 +1073,7 @@ def create_mdp_files(work_dir, long_md=False):
     except (NameError, KeyError):
         em_settings = {"integrator": "steep", "nsteps": 50000, "emtol": 1000.0, "emstep": 0.01}
         nvt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300}
-        npt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
+        npt1_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
         npt2_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
         md_settings = {"integrator": "sd", "dt": 0.002, "temperature": 300, "pressure": 1.0}
         output_freq = {"energy": 5000, "log": 5000, "trajectory": 5000}
@@ -1165,13 +1165,13 @@ gen_temp = 300 ; Initial temperature (K)
 gen_seed = -1 ; Random seed (-1 means use current time for seed)
 """
     
-    # NPT MDP - SD integrator with random seed
-    npt_mdp = f""";title = Lysozyme NVT equilibration
+    # NPT1 MDP - SD integrator with random seed
+    npt1_mdp = f""";title = Lysozyme NVT equilibration
 define = -DPOSRES ; Apply position restraints to protein
 ; = Run control =
 integrator = md ; Leap-frog integrator
-dt = {npt_settings["dt"]}
-nsteps = {npt_settings["nsteps"]}
+dt = {npt1_settings["dt"]}
+nsteps = {npt1_settings["nsteps"]}
 
 ; = Output control =
 nstxout = 1000 ; Write coordinates every 2 ps (controls file size)
@@ -1341,7 +1341,7 @@ gen_vel = no ; Do not generate velocities (continue from previous run)
     
     # 파일들 저장
     for name, content in [("em.mdp", em_mdp), ("nvt.mdp", nvt_mdp), 
-                         ("npt.mdp", npt_mdp), ("npt2.mdp", npt2_mdp), ("md.mdp", md_mdp)]:
+                         ("npt1.mdp", npt1_mdp), ("npt2.mdp", npt2_mdp), ("md.mdp", md_mdp)]:
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
