@@ -1871,6 +1871,163 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, lon
             "close_contact_in_iteration": False,
             "failure_type": "max_attempts_exceeded"
         }
+    
+def split_protein_ligand(input_pdb, work_dir, ligand_chain="L"):
+    """복합체에서 protein과 ligand 분리"""
+    try:
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure("complex", input_pdb)
+        
+        # Protein 구조 생성
+        protein_structure = Structure.Structure("protein")
+        protein_model = Model.Model(0)
+        protein_structure.add(protein_model)
+        
+        # Ligand 구조 생성  
+        ligand_structure = Structure.Structure("ligand")
+        ligand_model = Model.Model(0)
+        ligand_structure.add(ligand_model)
+        
+        for model in structure:
+            for chain in model:
+                new_chain = PDBChain.Chain(chain.id)
+                for residue in chain:
+                    new_residue = PDBResidue.Residue(residue.id, residue.resname, residue.segid)
+                    for atom in residue:
+                        new_atom = Atom.Atom(atom.name, atom.coord, atom.bfactor,
+                                            atom.occupancy, atom.altloc, atom.fullname,
+                                            atom.serial_number, atom.element)
+                        new_residue.add(new_atom)
+                    new_chain.add(new_residue)
+                
+                if chain.id == ligand_chain:
+                    ligand_model.add(new_chain)
+                else:
+                    protein_model.add(new_chain)
+        
+        # 저장
+        io = PDBIO()
+        protein_pdb = os.path.join(work_dir, "protein_only.pdb")
+        ligand_pdb = os.path.join(work_dir, "ligand_only.pdb")
+        
+        io.set_structure(protein_structure)
+        io.save(protein_pdb)
+        
+        io.set_structure(ligand_structure)
+        io.save(ligand_pdb)
+        
+        logger.info(f"Protein/Ligand 분리 완료")
+        return protein_pdb, ligand_pdb
+        
+    except Exception as e:
+        logger.error(f"Protein/Ligand 분리 실패: {e}")
+        return None, None
+
+def prepare_ligand_topology(ligand_pdb, work_dir, pdb_code):
+    """Ligand topology 준비 및 복사"""
+    try:
+        # 미리 준비된 ligand topology 파일 찾기
+        ligand_top_dir = LIGAND_TOPOLOGY_DIR if 'LIGAND_TOPOLOGY_DIR' in globals() else "./ligand_topologies"
+        ligand_itp = os.path.join(ligand_top_dir, f"{pdb_code}_ligand.itp")
+        ligand_gro = os.path.join(ligand_top_dir, f"{pdb_code}_ligand.gro")
+        
+        if not os.path.exists(ligand_itp):
+            logger.warning(f"Ligand topology 파일 없음: {ligand_itp}")
+            logger.info("ACPYPE나 LigParGen으로 ligand topology를 생성하세요")
+            return False
+        
+        # Work directory로 복사
+        shutil.copy(ligand_itp, os.path.join(work_dir, "ligand.itp"))
+        
+        # Ligand PDB를 GRO로 변환
+        cmd = f"gmx editconf -f {ligand_pdb} -o ligand.gro"
+        success, _, _ = run_command_with_output_check(cmd, work_dir, expected_output="ligand.gro")
+        
+        logger.info("Ligand topology 준비 완료")
+        return success
+        
+    except Exception as e:
+        logger.error(f"Ligand topology 준비 실패: {e}")
+        return False
+
+def merge_protein_ligand_topology(work_dir):
+    """Protein과 Ligand topology 병합"""
+    try:
+        topol_file = os.path.join(work_dir, "topol.top")
+        
+        # topol.top 읽기
+        with open(topol_file, 'r') as f:
+            lines = f.readlines()
+        
+        # [ molecules ] 섹션 찾기
+        molecules_idx = -1
+        for i, line in enumerate(lines):
+            if '[ molecules ]' in line:
+                molecules_idx = i
+                break
+        
+        if molecules_idx == -1:
+            logger.error("[ molecules ] 섹션을 찾을 수 없음")
+            return False
+        
+        # Ligand include 추가 ([ molecules ] 섹션 전에)
+        ligand_include = '#include "ligand.itp"\n'
+        if ligand_include not in ''.join(lines):
+            lines.insert(molecules_idx, ligand_include)
+            molecules_idx += 1
+        
+        # Ligand 분자 추가 ([ molecules ] 섹션 끝에)
+        # Protein_chain_X 라인들 다음에 추가
+        insert_idx = molecules_idx + 1
+        while insert_idx < len(lines) and lines[insert_idx].strip() and not lines[insert_idx].startswith(';'):
+            insert_idx += 1
+        
+        lines.insert(insert_idx, "LIG                  1\n")
+        
+        # 저장
+        with open(topol_file, 'w') as f:
+            f.writelines(lines)
+        
+        logger.info("Topology 병합 완료")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Topology 병합 실패: {e}")
+        return False
+
+def merge_protein_ligand_structure(protein_gro, ligand_gro, output_gro, work_dir):
+    """Protein과 Ligand 구조 병합"""
+    try:
+        # Protein 읽기
+        with open(protein_gro, 'r') as f:
+            protein_lines = f.readlines()
+        
+        # Ligand 읽기
+        with open(ligand_gro, 'r') as f:
+            ligand_lines = f.readlines()
+        
+        # 원자 수 업데이트
+        total_atoms = int(protein_lines[1].strip()) + int(ligand_lines[1].strip())
+        
+        # 병합
+        merged_lines = [protein_lines[0]]  # Title
+        merged_lines.append(f"{total_atoms}\n")  # Total atoms
+        merged_lines.extend(protein_lines[2:-1])  # Protein atoms
+        merged_lines.extend(ligand_lines[2:-1])   # Ligand atoms
+        merged_lines.append(protein_lines[-1])    # Box vectors
+        
+        # 저장
+        with open(output_gro, 'w') as f:
+            f.writelines(merged_lines)
+        
+        logger.info(f"구조 병합 완료: {output_gro}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"구조 병합 실패: {e}")
+        return False
+
+
 def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues, structure_results):
     """구조의 모든 iteration 실행"""
     iteration = 0

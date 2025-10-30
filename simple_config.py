@@ -5,9 +5,13 @@ MAX_ITERATIONS = 99999999          # 최대 iteration 수
 MAX_ATTEMPTS = 100           # iteration당 최대 attempt 수
 SIMULATION_TIME_NS = 0.3     # MD 시뮬레이션 시간 (ns) - 300ps
 ENABLE_CHAIN_RESTORATION = False
-
 # 기울기 임계값 (음수여야 채택)
 SLOPE_THRESHOLD = -0.00001
+
+# ===== Ligand 설정 추가 =====
+LIGAND_CHAIN = "L"  # Ligand chain ID
+LIGAND_TOPOLOGY_DIR = "./ligand_topologies"  # Ligand topology 파일 디렉토리
+ENABLE_LIGAND = True  # Ligand 처리 활성화
 
 # ===== 복합체 분석 설정 =====
 BINDING_SITE_CUTOFF = 4.0        # Binding site 정의 거리 임계값 (Å)
