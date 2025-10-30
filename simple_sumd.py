@@ -1236,9 +1236,7 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
         success, returncode, stderr = run_command_with_output_check(
             cmd, 
             cwd=work_dir, 
-            expected_output=["md.gro", "md.xtc"], 
-            max_retries=max_retries,
-            enable_cpi_recovery=long_md  # Long MD만 자동 복구 활성화
+            expected_output=["md.gro", "md.xtc"]
         )
         
         if not success:
@@ -1292,131 +1290,6 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
         logger.debug(f"상세 오류: {traceback.format_exc()}")
         return result
     
-def save_last_failed_attempt(work_dir, failed_stage, error_info, attempt_num):
-    """
-    마지막 실패한 attempt의 전체 파일 저장 (GROMACS 오류만)
-    
-    Args:
-        work_dir: 현재 작업 디렉토리
-        failed_stage: 실패한 단계명 (e.g., "em", "nvt", "md")
-        error_info: 에러 정보 dict {
-            'returncode': int,
-            'stderr': str,
-            'stdout': str (optional)
-        }
-        attempt_num: attempt 번호
-        
-    Returns:
-        str: 저장된 디렉토리 경로
-    """
-    # iteration 디렉토리 (work_dir의 부모)
-    iter_dir = os.path.dirname(work_dir) if "attempt" in work_dir else work_dir
-    last_failed_dir = os.path.join(iter_dir, "last_failed_attempt")
-    
-    logger.info(f"마지막 실패 attempt 저장: {failed_stage} 단계")
-    
-    # 기존 디렉토리 삭제 (이전 실패 덮어쓰기)
-    if os.path.exists(last_failed_dir):
-        shutil.rmtree(last_failed_dir)
-    os.makedirs(last_failed_dir)
-    
-    # 1. 실패 단계 기록
-    with open(os.path.join(last_failed_dir, "failed_stage.txt"), "w") as f:
-        f.write(f"Failed Stage: {failed_stage}\n")
-        f.write(f"Attempt Number: {attempt_num}\n")
-        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-    
-    # 2. 전체 에러 로그 저장
-    with open(os.path.join(last_failed_dir, "full_error.log"), "w") as f:
-        f.write("=== STDERR ===\n")
-        f.write(error_info.get('stderr', 'No stderr available'))
-        f.write("\n\n")
-        if 'stdout' in error_info:
-            f.write("=== STDOUT ===\n")
-            f.write(error_info['stdout'])
-        f.write("\n\n")
-        f.write(f"Return Code: {error_info.get('returncode', 'unknown')}\n")
-    
-    # 3. 모든 관련 파일 복사
-    files_to_save = {
-        # 입력 파일
-        'input.pdb': '입력 PDB',
-        'topol.top': '토폴로지',
-        '*.itp': '토폴로지 include',
-        
-        # MDP 파일들
-        '*.mdp': 'MDP 설정',
-        
-        # 중간 단계 결과
-        'complex.gro': 'pdb2gmx 결과',
-        'box.gro': 'editconf 결과',
-        'solv.gro': 'solvate 결과',
-        'solv_ions.gro': 'genion 결과',
-        
-        # 평형화 단계 결과
-        'equilibrated.gro': '평형화 결과',
-        'equilibrated.cpt': '평형화 체크포인트',
-        'em.gro': 'EM 결과',
-        'em.log': 'EM 로그',
-        'em.edr': 'EM 에너지',
-        'nvt.gro': 'NVT 결과',
-        'nvt.log': 'NVT 로그',
-        'nvt.cpt': 'NVT 체크포인트',
-        'npt.gro': 'NPT 결과',
-        'npt.log': 'NPT 로그',
-        'npt.cpt': 'NPT 체크포인트',
-        
-        # MD 결과 (부분적으로라도 생성된 경우)
-        'md.tpr': 'MD 입력',
-        'md.gro': 'MD 최종 구조',
-        'md.log': 'MD 로그',
-        'md.edr': 'MD 에너지',
-        'md.cpt': 'MD 체크포인트',
-        'md.xtc': 'MD 궤적',
-        
-        # 기타 스냅샷
-        'confout.gro': '마지막 좌표',
-        'ener.edr': '마지막 에너지',
-        'prev.gro': '이전 구조',
-        'prev.cpt': '이전 체크포인트'
-    }
-    
-    saved_files = []
-    for pattern, description in files_to_save.items():
-        if '*' in pattern:
-            # 와일드카드 패턴
-            for file_path in glob.glob(os.path.join(work_dir, pattern)):
-                if os.path.exists(file_path):
-                    dest = os.path.join(last_failed_dir, os.path.basename(file_path))
-                    shutil.copy(file_path, dest)
-                    saved_files.append(os.path.basename(file_path))
-        else:
-            # 단일 파일
-            file_path = os.path.join(work_dir, pattern)
-            if os.path.exists(file_path):
-                dest = os.path.join(last_failed_dir, pattern)
-                shutil.copy(file_path, dest)
-                saved_files.append(pattern)
-    
-    # 4. 저장된 파일 목록 기록
-    with open(os.path.join(last_failed_dir, "saved_files.txt"), "w") as f:
-        f.write(f"Total files saved: {len(saved_files)}\n")
-        f.write(f"Failed stage: {failed_stage}\n\n")
-        f.write("Files:\n")
-        for file in sorted(saved_files):
-            file_size = os.path.getsize(os.path.join(last_failed_dir, file))
-            f.write(f"  - {file} ({file_size} bytes)\n")
-    
-    total_size = sum(
-        os.path.getsize(os.path.join(last_failed_dir, f)) 
-        for f in os.listdir(last_failed_dir)
-    )
-    
-    logger.info(f"저장 완료: {len(saved_files)}개 파일, 총 {total_size / (1024*1024):.1f} MB")
-    logger.info(f"저장 위치: {last_failed_dir}")
-    
-    return last_failed_dir
-
 def create_md_mdp_files(work_dir, cpi_option=True, long_md=False):
     """MDP 파일들 생성 - SD integrator 및 랜덤 시드 적용"""
     
@@ -2017,7 +1890,11 @@ def run_attempt(iter_dir, prev_gro, prev_cpt, topology, itp_files, attempt_num, 
         "close_contact_detected": min_distance <= CLOSE_DISTANCE_THRESHOLD
     }
 
-def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, prev_equilibrated_state=None, long_md=False):
+def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, 
+                 prev_equilibrated_state=None, long_md=False, prev_final_distance=None):
+    """
+    prev_final_distance: 이전 iteration의 최종 거리 (Å)
+    """
     with logger.context(iteration=iteration_num):
         logger.info(f"Iteration 시작 {'(긴 MD)' if long_md else ''}")
         
@@ -2033,9 +1910,9 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
                 )
                 logger.info("평형화 완료 - 이후 모든 attempt는 이 상태에서 시작")
                 
-                # 추가: GRO를 PDB로 변환 후 초기 거리 측정 (Iteration 1에서만)
+                # 평형화 후 초기 거리 측정
                 equilibrated_pdb = os.path.join(iter_dir, "equilibrated.pdb")
-                cmd = f"echo 'Protein' | gmx trjconv -s {os.path.join(iter_dir, 'npt.tpr')} -f {equilibrated_gro} -o {equilibrated_pdb}"
+                cmd = f"echo 'Protein' | gmx trjconv -s {os.path.join(iter_dir, 'npt2.tpr')} -f {equilibrated_gro} -o {equilibrated_pdb}"
                 success, _, stderr = run_command_with_output_check(
                     cmd, iter_dir, expected_output="equilibrated.pdb"
                 )
@@ -2044,9 +1921,9 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
                     iteration_initial_distance = calculate_distance_binding_site(
                         equilibrated_pdb, binding_site_residues
                     )
-                    logger.info(f"전처리 후 초기 거리: {iteration_initial_distance:.2f}Å")
+                    logger.info(f"평형화 후 초기 거리: {iteration_initial_distance:.2f}Å")
                 else:
-                    logger.warning(f"GRO→PDB 변환 실패: {stderr}, 초기 거리 측정 생략")
+                    logger.warning(f"GRO→PDB 변환 실패: {stderr}")
                     iteration_initial_distance = None
                 
             except RuntimeError as e:
@@ -2059,11 +1936,16 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
                     "error": str(e)
                 }
         else:
+            # Iteration 2+: 이전 평형 상태 사용
             if prev_equilibrated_state is None:
                 raise ValueError("Iteration 2+ requires prev_equilibrated_state")
             equilibrated_gro, equilibrated_cpt, topology, itp_files = prev_equilibrated_state
             logger.info(f"이전 iteration의 평형 상태 사용: {os.path.basename(equilibrated_gro)}")
-            iteration_initial_distance = None  # Iteration 2+는 MD 첫 프레임 사용
+            
+            # 이전 iteration의 최종 거리 = 현재 초기 거리 (연속성 보장)
+            iteration_initial_distance = prev_final_distance
+            if iteration_initial_distance is not None:
+                logger.info(f"Iteration {iteration_num} 초기 거리 (이전 최종): {iteration_initial_distance:.2f}Å")
         
         # 여러 attempt 시도
         for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -2087,21 +1969,17 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
                 
                 if result["success"]:
                     logger.info("Iteration 성공!")
-                    final_gro = result.get('gro_file')
-                    final_cpt = result.get('cpt_file')
-                    
-                    # Iteration 2+에서는 채택된 attempt의 MD 첫 번째 프레임 거리 사용
-                    if iteration_initial_distance is None and 'initial_distance' in result:
-                        iteration_initial_distance = result['initial_distance']
-                        logger.info(f"Iteration {iteration_num} 초기 거리 (채택된 MD 첫 프레임): {iteration_initial_distance:.2f}Å")
+                    final_gro = result.get('gro')  # 수정: 'gro_file' → 'gro'
+                    final_cpt = result.get('cpt')  # 수정: 'cpt_file' → 'cpt'
                     
                     return {
                         "iteration": iteration_num,
                         "success": True,
                         "attempts_used": attempt,
-                        "iteration_initial_distance": iteration_initial_distance,  # 이제 Iteration 2+에서도 값이 채워짐
+                        "iteration_initial_distance": iteration_initial_distance,
                         "final_result": result,
                         "long_md": long_md,
+                        "long_md_executed": long_md,  # 명시적 추가
                         "close_contact_in_iteration": result.get("close_contact_detected", False),
                         "final_equilibrated_state": (final_gro, final_cpt, topology, itp_files)
                     }
@@ -2114,13 +1992,14 @@ def run_iteration(work_dir, input_pdb, iteration_num, binding_site_residues, pre
             "iteration": iteration_num,
             "success": False,
             "attempts_used": MAX_ATTEMPTS,
-            "iteration_initial_distance": iteration_initial_distance,  # ⭐ 추가
+            "iteration_initial_distance": iteration_initial_distance,
             "final_result": result,
             "long_md": long_md,
+            "long_md_executed": False,
             "close_contact_in_iteration": False,
             "failure_type": "max_attempts_exceeded"
         }
-
+    
 def make_dir(dir_path):
     """디렉토리 생성"""
     if not os.path.exists(dir_path):
@@ -2129,12 +2008,14 @@ def make_dir(dir_path):
 
 
 
-def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues, structure_results, original_pdb):
+def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues, 
+                                structure_results, original_pdb):
     """구조의 모든 iteration 실행"""
     iteration = 0
-    need_long_md = False
+    need_long_md = False  # 다음 iteration에 긴 MD 필요 여부
     first_dir = None
     prev_equilibrated_state = None  # (gro, cpt, topology, itp_files) 튜플
+    prev_final_distance = None  # ← 추가
     
     while iteration < MAX_ITERATIONS:
         iteration += 1
@@ -2154,7 +2035,8 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
                 iteration_num=iteration,
                 binding_site_residues=binding_site_residues,
                 prev_equilibrated_state=prev_equilibrated_state,
-                long_md=need_long_md
+                long_md=need_long_md,
+                prev_final_distance=prev_final_distance
             )
             structure_results["iterations"].append(iteration_result)
             
@@ -2164,21 +2046,28 @@ def execute_structure_iterations(current_pdb, struct_dir, binding_site_residues,
                 json.dump(iteration_result, f, indent=2, default=str)
             
             if iteration_result["success"]:
-                # 다음 iteration을 위한 평형 상태 업데이트 (gro, cpt, topology)
+                # 다음 iteration을 위한 상태 업데이트
                 prev_equilibrated_state = iteration_result.get("final_equilibrated_state")
+                prev_final_distance = iteration_result["final_result"].get("final_distance")  # ← 추가
                 
-                # 근접 접촉 검사 및 긴 MD 결정
-                if need_long_md:
+                # 긴 MD 완료 시 즉시 종료
+                if iteration_result.get("long_md_executed", False):
                     logger.info("긴 MD 완료, 시뮬레이션 종료")
-                    break
-                need_long_md = handle_close_contact_detection(iteration_result, need_long_md)
+                    break  # ← long_md_executed 변수 없이 바로 종료
+                
+                # 근접 접촉 감지 - 다음 iteration에 긴 MD 예정
+                if iteration_result.get("close_contact_in_iteration", False):
+                    if ENABLE_LONG_MD and not need_long_md:
+                        logger.info("근접 접촉 감지! 다음 iteration에 긴 MD 예정")
+                        need_long_md = True
             else:
-                # 실패 처리 및 재시작 결정
+                # 실패 처리
                 if should_restart_simulation(iteration_result):
-                    current_pdb = original_pdb  # 원점으로 돌아가기
+                    current_pdb = original_pdb
                     iteration = 0
                     need_long_md = False
-                    prev_equilibrated_state = None  # 평형 상태 초기화
+                    prev_equilibrated_state = None
+                    prev_final_distance = None  # ← 추가
                     continue
     
     return first_dir
