@@ -1164,7 +1164,8 @@ pcoupl = no ; No pressure coupling during ion insertion
         cmd, work_dir, expected_output="em.tpr"
     )
     if success:
-        cmd = f"gmx mdrun -v -deffnm em"
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm em -ntomp {NTOMP} \
+          -nb gpu -gpu_id {GPU_ID}"
         success, returncode, stderr = run_command_with_output_check(
             cmd, work_dir, expected_output=["em.gro", "em.edr"]
             )
@@ -1176,7 +1177,8 @@ pcoupl = no ; No pressure coupling during ion insertion
     cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
     if success:
-        cmd = f"gmx mdrun -v -deffnm nvt"
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} \
+          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
         success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
     else:
         raise RuntimeError(f"nvt 실패: {stderr}")
@@ -1186,7 +1188,8 @@ pcoupl = no ; No pressure coupling during ion insertion
     cmd = f"gmx grompp -f npt1.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt1.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt1.tpr")
     if success:
-        cmd = f"gmx mdrun -v -deffnm npt1"
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt1 -ntomp {NTOMP} \
+          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
         success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt1.gro", "npt1.cpt"])
     else:
         raise RuntimeError(f"npt1 실패: {stderr}")
@@ -1196,7 +1199,8 @@ pcoupl = no ; No pressure coupling during ion insertion
     cmd =f"gmx grompp -f npt2.mdp -c npt1.gro -t npt1.cpt -r npt1.gro -p topol.top -o npt2.tpr"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt2.tpr")
     if success:
-        cmd = f"gmx mdrun -v -deffnm npt2"
+        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt2 -ntomp {NTOMP} \
+          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
         success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt2.gro", "npt2.cpt"])
     else:
         raise RuntimeError(f"npt2 실패: {stderr}")
@@ -1832,161 +1836,6 @@ def calculate_slope(distances):
     denominator = sum((x[i] - x_mean) ** 2 for i in range(n))
     
     return numerator / denominator if denominator != 0 else 0.0
-
-def run_gromacs_pipeline(work_dir, input_pdb, long_md=False):
-    """GROMACS 파이프라인 실행"""
-    stages = []
-    
-    # 1. pdb2gmx
-    log("pdb2gmx 실행")
-    cmd = f"echo '1\\n1' | gmx pdb2gmx -f {input_pdb} -o complex.gro -p topol.top \
-          -water {WATER_MODEL} -ff {FORCE_FIELD} -ignh"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["complex.gro", "topol.top"])
-    stages.append({"stage": "pdb2gmx", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 2. editconf
-    log("editconf 실행")
-    cmd = f"gmx editconf -f complex.gro -o box.gro -c -d {BOX_DISTANCE} -bt cubic"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="box.gro")
-    stages.append({"stage": "editconf", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 3. solvate
-    log("solvate 실행")
-    cmd = "gmx solvate -cp box.gro -cs spc216.gro -o solv.gro -p topol.top"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="solv.gro")
-    stages.append({"stage": "solvate", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 4. ions grompp
-    log("ions grompp 실행")
-    with open(os.path.join(work_dir, "ions.mdp"), "w") as f:
-        f.write("""; ions.mdp -- GROMACS 2025.2
-; = Run control =
-integrator = steep ; Use steepest descent algorithm for energy minimization
-emtol = 1000.0 ; Stop minimization when max force < 1000 kJ/mol/nm
-emstep = 0.01 ; Maximum step size during energy minimization (nm)
-nsteps = 50000 ; Large enough max number of steps (usually converges earlier)
-continuation = yes ; Prevent coordinate constraints issue if starting at zero step
-; = Output control =
-nstxout = 0 ; Do not write coordinates to file
-nstvout = 0 ; Do not write velocities to file
-nstenergy = 1 ; Write energy file every step
-nstlog = 1 ; Write log file every step
-; = Neighbor searching =
-cutoff-scheme = Verlet ; Verlet neighbor list method (default and recommended)
-nstlist = 20 ; Neighbor list update frequency
-rlist = 1.3 ; Cutoff distance increased slightly to avoid excluded atom warnings (nm)
-; = Electrostatics and van der Waals =
-coulombtype = PME ; Use Particle Mesh Ewald for long-range electrostatics
-rcoulomb = 1.3 ; Electrostatics cutoff (nm)
-rvdw = 1.3 ; van der Waals cutoff (nm)
-pme_order = 4 ; PME interpolation order (cubic)
-fourierspacing = 0.12 ; PME FFT grid spacing (nm)
-; = Constraints =
-constraints = none ; No constraints (not required for ion insertion)
-; = Periodic boundary conditions =
-pbc = xyz ; Apply 3D periodic boundary conditions
-; = Temperature/Pressure coupling =
-tcoupl = no ; No temperature coupling during ion insertion
-pcoupl = no ; No pressure coupling during ion insertion
-""")
-    cmd = f"gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="ions.tpr")
-    stages.append({"stage": "ions_grompp", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 5. genion
-    log("genion 실행")
-    cmd = "echo 'SOL' | gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="solv_ions.gro")
-    stages.append({"stage": "genion", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # MDP 파일들 생성
-    create_premd_mdp_files(work_dir, long_md)
-    
-    # 6. EM
-    log("EM 실행")
-    cmd = f"gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="em.tpr")
-    if success:
-        cmd = f"gmx mdrun -v -deffnm em"
-        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["em.gro", "em.edr"])
-    stages.append({"stage": "em", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 7. NVT
-    log("NVT 실행")
-    cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
-    if success:
-        cmd = f"gmx mdrun -v -deffnm nvt"
-        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
-    stages.append({"stage": "nvt", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 8. NPT1
-    log("NPT1 실행")
-    cmd = f"gmx grompp -f npt1.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt1.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt1.tpr")
-    if success:
-        cmd = f"gmx mdrun -v -deffnm npt1"
-        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt1.gro", "npt1.cpt"])
-    stages.append({"stage": "npt1", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 9. NPT2
-    log("NPT2 실행")
-    cmd =f"gmx grompp -f npt2.mdp -c npt1.gro -t npt1.cpt -r npt1.gro -p topol.top -o npt2.tpr"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt2.tpr")
-    if success:
-        cmd = f"gmx mdrun -v -deffnm npt2"
-        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt2.gro", "npt2.cpt"])
-    stages.append({"stage": "npt2", "success": success})
-    if not success:
-        stages[-1]["stderr"]=stderr
-        return stages
-    
-    # 9. MD
-    md_label = "긴 MD" if long_md else "MD"
-    log(f"{md_label} 실행")
-    cmd = f"gmx grompp -f md.mdp -c npt2.gro -t npt2.cpt -op topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
-    if success:
-        max_retries = 2 if long_md else 0  # Long MD만 재시작 시도
-        cmd = f"gmx mdrun -v -deffnm md"
-        if long_md:
-            log(f"{md_label} - checkpoint 복구 기능 활성화 (최대 {max_retries}회 재시작)")
-            success,returncode, stderr = run_mdrun_with_checkpoint_recovery(
-                cmd, work_dir, expected_output=["md.gro", "md.xtc"], max_retries=max_retries, is_long_md=True
-            )
-        else:
-            success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"])
-
-    stages.append({"stage": md_label, "success": success})
-
-    if not success:
-        stages[-1]["stderr"]=stderr
-
-    return stages
 
 # ===== 체인 복원 함수들 =====
 @handle_structure_operations(default_return=[], context_info="원본 체인 순서 추출")
