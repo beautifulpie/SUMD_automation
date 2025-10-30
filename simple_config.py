@@ -30,7 +30,7 @@ MAX_ROTATION_VARIANTS = 1           # 최대 회전 변형 수
 STRUCTURE_ROTATION = 120     # 랜덤 최대 각도
 
 # ===== GROMACS 설정 =====
-GPU_ID = "0123"                 #  사용할 GPU ID
+GPU_ID = "12"                 #  사용할 GPU ID
 #MPI_RANKS = "1"              # MPI 랭크 수
 #NTOMP = "1"                  # OpenMP 스레드 수
 FORCE_FIELD = "charmm36-jul2022"  # Force field
@@ -66,7 +66,7 @@ MDP_SETTINGS = {
         "nsteps": 100000,  # 200ps
         "temperature": 300
     },
-    "npt": {
+    "npt1": {
         "integrator": "md", 
         "dt": 0.002,
         "nsteps": 300000,  # 600ps
