@@ -43,7 +43,6 @@ except ImportError:
     CLOSE_DISTANCE_THRESHOLD = 10.0
     LONG_MD_TIME_NS = 10.0
     ENABLE_LONG_MD = True
-    TIMEOUT_LONG_MD = 7200
     BOX_DISTANCE = 1.5
     MAX_WARNINGS = 1
     ENABLE_MULTI_DIRECTION_SEPARATION = True
@@ -948,14 +947,14 @@ def calculate_distance_binding_site(pdb_file, binding_site_residues):
 
 # ===== GROMACS 관련 함수들 =====
 
-def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_output=None, timeout=3600):
+def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_output=None):
     """명령어 실행 및 목적 파일 생성 확인"""
     try:
         log(f"실행: {cmd}")
         result = subprocess.run(
             cmd, shell=True, cwd=cwd, 
             input=input_text.encode() if input_text else None,
-            capture_output=True, text=True, timeout=timeout
+            capture_output=True, text=True
         )
         
         if result.returncode != 0:
@@ -985,7 +984,7 @@ def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_outpu
         log(f"명령어 실행 실패: {e}")
         return False, 1, f"명령어 실행 실패: {e}"
     
-def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_output=[], timeout=3600, max_retries=2, is_long_md=False):
+def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_output=[], max_retries=2, is_long_md=False):
     """GROMACS mdrun을 checkpoint 복구 기능과 함께 실행"""
     attempt = 0
     
@@ -997,7 +996,7 @@ def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_outp
                 result = subprocess.run(
                     cmd, shell=True, cwd=cwd, 
                     input=input_text.encode() if input_text else None,
-                    capture_output=True, text=True, timeout=timeout
+                    capture_output=True, text=True
                 )
             else:
                 # 재시작 시도 - checkpoint 파일 확인
@@ -1019,7 +1018,7 @@ def run_mdrun_with_checkpoint_recovery(cmd, cwd="", input_text="", expected_outp
                 
                 result = subprocess.run(
                     restart_cmd, shell=True, cwd=cwd,
-                    capture_output=True, text=True, timeout=timeout
+                    capture_output=True, text=True
                 )
             
             # 실행 결과 확인
@@ -1063,7 +1062,7 @@ def create_mdp_files(work_dir, long_md=False):
     try:
         em_settings = MDP_SETTINGS["em"]
         nvt_settings = MDP_SETTINGS["nvt"] 
-        npt_settings = MDP_SETTINGS["npt"]
+        npt1_settings = MDP_SETTINGS["npt1"]
         npt2_settings = MDP_SETTINGS["npt2"]
         md_settings = MDP_SETTINGS["md"]
         output_freq = OUTPUT_FREQUENCY
@@ -1074,7 +1073,7 @@ def create_mdp_files(work_dir, long_md=False):
     except (NameError, KeyError):
         em_settings = {"integrator": "steep", "nsteps": 50000, "emtol": 1000.0, "emstep": 0.01}
         nvt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300}
-        npt_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
+        npt1_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
         npt2_settings = {"integrator": "sd", "dt": 0.002, "nsteps": 25000, "temperature": 300, "pressure": 1.0}
         md_settings = {"integrator": "sd", "dt": 0.002, "temperature": 300, "pressure": 1.0}
         output_freq = {"energy": 5000, "log": 5000, "trajectory": 5000}
@@ -1111,59 +1110,68 @@ pbc = xyz ; Apply 3D periodic boundary conditions
 """
     
     # NVT MDP - SD integrator with random seed
-    nvt_mdp = f"""title = Lysozyme NVT equilibration
+    nvt_mdp = f""";title = Lysozyme NVT equilibration
 define = -DPOSRES ; Apply position restraints to protein
+
 ; = Run control =
 integrator = md ; Leap-frog integrator
 dt = {nvt_settings["dt"]}
 nsteps = {nvt_settings["nsteps"]}
+
 ; = Output control =
 nstxout = 1000 ; Write coordinates every 2 ps (controls file size)
 nstvout = 1000 ; Write velocities every 2 ps
 nstenergy = {output_freq["energy"]}
 nstlog = {output_freq["log"]}
 nstxout-compressed = {output_freq["trajectory"]}
+
 ; = Bond/constraints =
 continuation = no ; Fresh dynamics start (not continuing previous run)
 constraint_algorithm = lincs ; LINCS algorithm for constraints
-constraints = h-bonds ; Constrain hydrogen bonds only (recommended;
-change if all-bonds needed)
+constraints = h-bonds ; Constrain hydrogen bonds only (recommended;change if all-bonds needed)
 lincs_iter = 1 ; LINCS iteration count (accuracy)
 lincs_order = 4 ; LINCS order (accuracy, performance trade-off)
+
 ; = Neighbor searching =
 cutoff-scheme nstlist rlist = Verlet ; Verlet neighbor list (default since GROMACS 2020)
 nstlist = 10 ; Neighbor list update every 20 fs (10 * 2 fs)
 rlist = 1.3 ; Neighbor list cutoff distance (nm; recommended)
 rcoulomb = 1.3 ; Coulomb cutoff (nm)
 rvdw = 1.3 ; Van der Waals cutoff (nm)
+
 ; = Electrostatics =
 coulombtype = PME ; Particle Mesh Ewald electrostatics
 pme_order = 4 ; PME interpolation order (cubic)
 fourierspacing = 0.12 ; PME FFT grid spacing (finer grid)
+
 ; = Temperature coupling =
 tcoupl = V-rescale ; Modified Berendsen thermostat
 tc-grps = Protein Non-Protein ; Two coupling groups: Protein and solvent/ions
 tau_t = 0.1 0.1 ; Temperature coupling time constants (ps)
 ref_t = 300 300 ; Reference temperatures (Kelvin)
+
 ; = Pressure coupling =
 pcoupl = no ; No pressure coupling for NVT ensemble
+
 ; = Periodic boundary conditions =
 pbc = xyz ; 3D periodic boundary conditions
+
 ; = Dispersion correction =
 DispCorr = EnerPres ; Dispersion correction for energy and pressure
+
 ; = Velocity generation =
 gen_vel = yes ; Generate initial velocities from Maxwell distribution
 gen_temp = 300 ; Initial temperature (K)
 gen_seed = -1 ; Random seed (-1 means use current time for seed)
 """
     
-    # NPT MDP - SD integrator with random seed
-    npt_mdp = f"""title = Lysozyme NVT equilibration
+    # NPT1 MDP - SD integrator with random seed
+    npt1_mdp = f""";title = Lysozyme NVT equilibration
 define = -DPOSRES ; Apply position restraints to protein
 ; = Run control =
 integrator = md ; Leap-frog integrator
-dt = {npt_settings["dt"]}
-nsteps = {npt_settings["nsteps"]}
+dt = {npt1_settings["dt"]}
+nsteps = {npt1_settings["nsteps"]}
 
 ; = Output control =
 nstxout = 1000 ; Write coordinates every 2 ps (controls file size)
@@ -1216,7 +1224,7 @@ gen_vel = no ; Do not generate new velocities; continue from previous run
 """
     
     # NPT2 MDP - SD integrator with random seed
-    npt2_mdp = f"""title = Lysozyme NPT production ; Simulation title for production run
+    npt2_mdp = f""";title = Lysozyme NPT production ; Simulation title for production run
 ; define = -DPOSRES ; Position restraints disabled (commented out)
 
 ; = Run control =
@@ -1278,7 +1286,7 @@ gen_vel = no ; Do not generate new velocities; continue run
     simulation_time = LONG_MD_TIME_NS if long_md else SIMULATION_TIME_NS
     nsteps = int(simulation_time * 1000 / md_settings["dt"])
     
-    md_mdp = f"""title = Lysozyme MD ; Simulation title
+    md_mdp = f""";title = Lysozyme MD ; Simulation title
 integrator = sd ; Use leap-frog integrator (standard MD)
 nsteps = {nsteps}
 dt = 0.002 ; Time step size of 2 fs
@@ -1333,7 +1341,7 @@ gen_vel = no ; Do not generate velocities (continue from previous run)
     
     # 파일들 저장
     for name, content in [("em.mdp", em_mdp), ("nvt.mdp", nvt_mdp), 
-                         ("npt.mdp", npt_mdp), ("npt2.mdp", npt2_mdp), ("md.mdp", md_mdp)]:
+                         ("npt1.mdp", npt1_mdp), ("npt2.mdp", npt2_mdp), ("md.mdp", md_mdp)]:
         with open(os.path.join(work_dir, name), "w") as f:
             f.write(content)
 
@@ -1491,25 +1499,25 @@ pcoupl = no ; No pressure coupling during ion insertion
         stages[-1]["stderr"]=stderr
         return stages
     
-    # 8. NPT
-    log("NPT 실행")
-    cmd = f"gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt.tpr -maxwarn {MAX_WARNINGS}"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt.tpr")
+    # 8. NPT1
+    log("NPT1 실행")
+    cmd = f"gmx grompp -f npt1.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt1.tpr -maxwarn {MAX_WARNINGS}"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt1.tpr")
     if success:
-        cmd = f"gmx mdrun -v -deffnm npt"
-        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt.gro", "npt.cpt"])
-    stages.append({"stage": "npt", "success": success})
+        cmd = f"gmx mdrun -v -deffnm npt1"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt1.gro", "npt1.cpt"])
+    stages.append({"stage": "npt1", "success": success})
     if not success:
         stages[-1]["stderr"]=stderr
         return stages
     
     # 9. NPT2
     log("NPT2 실행")
-    cmd =f"gmx grompp -f npt2.mdp -c npt@.gro -t npt@.cpt -r npt@.gro -p topol.top -o npt#.tpr"
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt#.tpr")
+    cmd =f"gmx grompp -f npt2.mdp -c npt1.gro -t npt1.cpt -r npt1.gro -p topol.top -o npt2.tpr"
+    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt2.tpr")
     if success:
-        cmd = f"gmx mdrun -v -deffnm npt#"
-        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt#.gro", "npt#.cpt"])
+        cmd = f"gmx mdrun -v -deffnm npt2"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt2.gro", "npt2.cpt"])
     stages.append({"stage": "npt2", "success": success})
     if not success:
         stages[-1]["stderr"]=stderr
@@ -1518,19 +1526,18 @@ pcoupl = no ; No pressure coupling during ion insertion
     # 9. MD
     md_label = "긴 MD" if long_md else "MD"
     log(f"{md_label} 실행")
-    cmd = f"gmx grompp -f md.mdp -c npt@.gro -t npt@.cpt -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
+    cmd = f"gmx grompp -f md.mdp -c npt2.gro -t npt2.cpt -op topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="md.tpr")
     if success:
-        timeout = TIMEOUT_LONG_MD if long_md else TIMEOUT_GROMACS
         max_retries = 2 if long_md else 0  # Long MD만 재시작 시도
         cmd = f"gmx mdrun -v -deffnm md"
         if long_md:
             log(f"{md_label} - checkpoint 복구 기능 활성화 (최대 {max_retries}회 재시작)")
             success,returncode, stderr = run_mdrun_with_checkpoint_recovery(
-                cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout, max_retries=max_retries, is_long_md=True
+                cmd, work_dir, expected_output=["md.gro", "md.xtc"], max_retries=max_retries, is_long_md=True
             )
         else:
-            success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"], timeout=timeout)
+            success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["md.gro", "md.xtc"])
 
     stages.append({"stage": md_label, "success": success})
 
