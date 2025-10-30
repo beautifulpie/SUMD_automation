@@ -1394,16 +1394,66 @@ def calculate_slope(distances):
 def run_gromacs_pipeline(work_dir, input_pdb, long_md=False):
     """GROMACS 파이프라인 실행"""
     stages = []
+
+    # Ligand 처리 활성화 여부 확인
+    enable_ligand = globals().get('ENABLE_LIGAND', False)
+    ligand_chain = globals().get('LIGAND_CHAIN', 'L')
+    
+    # Ligand 처리: protein과 ligand 분리
+    if enable_ligand:
+        log("Protein-Ligand 분리 시작")
+        protein_pdb, ligand_pdb = split_protein_ligand(input_pdb, work_dir, ligand_chain)
+        
+        if not protein_pdb or not ligand_pdb:
+            log("Protein-Ligand 분리 실패")
+            stages.append({"stage": "split_protein_ligand", "success": False})
+            return stages
+        
+        # PDB 코드 추출 (topology 파일 찾기용)
+        pdb_code = os.path.basename(input_pdb).split('_')[0]
+        
+        # Ligand topology 준비
+        log("Ligand topology 준비")
+        if not prepare_ligand_topology(ligand_pdb, work_dir, pdb_code):
+            log("Ligand topology 준비 실패")
+            stages.append({"stage": "prepare_ligand_topology", "success": False})
+            return stages
+        
+        # 이후 pdb2gmx는 protein만 사용
+        input_for_pdb2gmx = protein_pdb
+    else:
+        input_for_pdb2gmx = input_pdb
     
     # 1. pdb2gmx
     log("pdb2gmx 실행")
-    cmd = f"echo '1\\n1' | gmx pdb2gmx -f {input_pdb} -o complex.gro -p topol.top \
+    cmd = f"echo '1\\n1' | gmx pdb2gmx -f {input_for_pdb2gmx} -o complex.gro -p topol.top \
           -water {WATER_MODEL} -ff {FORCE_FIELD} -ignh"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["complex.gro", "topol.top"])
     stages.append({"stage": "pdb2gmx", "success": success})
     if not success:
         stages[-1]["stderr"]=stderr
         return stages
+    
+    # Ligand 처리: topology와 구조 병합
+    if enable_ligand:
+        log("Topology 병합")
+        if not merge_protein_ligand_topology(work_dir):
+            log("Topology 병합 실패")
+            stages.append({"stage": "merge_topology", "success": False})
+            return stages
+        
+        log("구조 병합")
+        protein_gro = os.path.join(work_dir, "complex.gro")
+        ligand_gro = os.path.join(work_dir, "ligand.gro")
+        merged_gro = os.path.join(work_dir, "complex_merged.gro")
+        
+        if not merge_protein_ligand_structure(protein_gro, ligand_gro, merged_gro, work_dir):
+            log("구조 병합 실패")
+            stages.append({"stage": "merge_structure", "success": False})
+            return stages
+        
+        # 병합된 구조를 사용하도록 변경
+        shutil.copy(merged_gro, protein_gro)
     
     # 2. editconf
     log("editconf 실행")
@@ -1728,22 +1778,47 @@ def restore_original_chain_ids(gromacs_pdb, output_pdb, work_dir):
 
 @handle_gromacs_operations("다음 iteration 구조 생성")
 def create_next_iteration_structure(work_dir, output_pdb, long_md=False):
-    """다음 iteration을 위한 구조 생성 (protein group 선택, 체인 정보 보존)"""
+    """다음 iteration을 위한 구조 생성 (Protein + Ligand 모두 포함)"""
     tpr_file = os.path.join(work_dir, "md.tpr")
     gro_file = os.path.join(work_dir, "md.gro")
     
-    # GROMACS로 protein만 추출
-    temp_pdb = os.path.join(work_dir, "protein_only.pdb")
-    cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {gro_file} -o {temp_pdb}"
+    enable_ligand = globals().get('ENABLE_LIGAND', False)
     
-    success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="protein_only.pdb")
-
+    if enable_ligand:
+        # Ligand가 있는 경우: System 전체 추출 (Protein + Ligand, 물/이온 제외)
+        temp_pdb = os.path.join(work_dir, "system_no_solvent.pdb")
+        
+        # 먼저 그룹 확인
+        cmd = f"echo 'q' | gmx make_ndx -f {tpr_file}"
+        run_command_with_output_check(cmd, work_dir)
+        
+        # Protein-Ligand만 추출 (그룹 번호는 make_ndx 결과 확인 필요)
+        # 일반적으로 "Protein" + "non-Water_and_non-Ion" 또는 직접 그룹 생성
+        cmd = f"echo -e 'a LIG | a Protein\\nq' | gmx make_ndx -f {tpr_file} -o index.ndx"
+        run_command_with_output_check(cmd, work_dir, expected_output="index.ndx")
+        
+        # 새로 만든 그룹으로 추출 (보통 마지막 그룹)
+        cmd = f"echo 'Protein_LIG' | gmx trjconv -s {tpr_file} -f {gro_file} -o {temp_pdb} -n index.ndx"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="system_no_solvent.pdb")
+        
+        if not success:
+            # 대체 방법: 숫자로 직접 지정 (보통 Protein=1, LIG=새 그룹)
+            logger.warning("그룹 이름 추출 실패, 숫자로 시도")
+            cmd = f"echo '13' | gmx trjconv -s {tpr_file} -f {gro_file} -o {temp_pdb}"
+            success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="system_no_solvent.pdb")
+        
+    else:
+        # Ligand 없는 경우: Protein만 추출 (기존 로직)
+        temp_pdb = os.path.join(work_dir, "protein_only.pdb")
+        cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {gro_file} -o {temp_pdb}"
+        success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="protein_only.pdb")
+    
     if not success:
-        raise RuntimeError("protein 추출 실패")
+        raise RuntimeError(f"구조 추출 실패: {stderr}")
     
     shutil.copy(temp_pdb, output_pdb)
-    logger.info("다음 iteration용 구조 복사 완료")
-
+    logger.info("다음 iteration용 구조 복사 완료 (Protein + Ligand)")
+    
     # 임시 파일 정리
     if os.path.exists(temp_pdb):
         os.remove(temp_pdb)
@@ -1936,27 +2011,32 @@ def prepare_ligand_topology(ligand_pdb, work_dir, pdb_code):
         # 미리 준비된 ligand topology 파일 찾기
         ligand_top_dir = LIGAND_TOPOLOGY_DIR if 'LIGAND_TOPOLOGY_DIR' in globals() else "./ligand_topologies"
         ligand_itp = os.path.join(ligand_top_dir, f"{pdb_code}_ligand.itp")
-        ligand_gro = os.path.join(ligand_top_dir, f"{pdb_code}_ligand.gro")
         
         if not os.path.exists(ligand_itp):
             logger.warning(f"Ligand topology 파일 없음: {ligand_itp}")
             logger.info("ACPYPE나 LigParGen으로 ligand topology를 생성하세요")
+            logger.info(f"필요한 파일: {pdb_code}_ligand.itp")
             return False
         
         # Work directory로 복사
         shutil.copy(ligand_itp, os.path.join(work_dir, "ligand.itp"))
+        logger.info(f"Ligand topology 복사 완료: {ligand_itp}")
         
         # Ligand PDB를 GRO로 변환
         cmd = f"gmx editconf -f {ligand_pdb} -o ligand.gro"
-        success, _, _ = run_command_with_output_check(cmd, work_dir, expected_output="ligand.gro")
+        success, _, stderr = run_command_with_output_check(cmd, work_dir, expected_output="ligand.gro")
+        
+        if not success:
+            logger.error(f"Ligand GRO 변환 실패: {stderr}")
+            return False
         
         logger.info("Ligand topology 준비 완료")
-        return success
+        return True
         
     except Exception as e:
         logger.error(f"Ligand topology 준비 실패: {e}")
         return False
-
+    
 def merge_protein_ligand_topology(work_dir):
     """Protein과 Ligand topology 병합"""
     try:
