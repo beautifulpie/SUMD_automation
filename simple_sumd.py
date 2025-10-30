@@ -955,7 +955,7 @@ def run_command_with_output_check(cmd, cwd=None, input_text=None, expected_outpu
         result = subprocess.run(
             cmd, shell=True, cwd=cwd, 
             input=input_text.encode() if input_text else None,
-            capture_output=True, text=True, timeout=timeout
+            capture_output=True, text=True
         )
         
         if result.returncode != 0:
