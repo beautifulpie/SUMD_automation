@@ -1226,10 +1226,9 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
         
         # 2. mdrun - enable_cpi에 따라 -cpi 옵션 추가/제거
         logger.info(f"2/2: {md_label} 실행 {'(체크포인트 연속)' if enable_cpi else '(새로 시작)'}")
-        max_retries = 2 if long_md else 0
         
         # enable_cpi에 따라 -cpi 옵션 추가 여부 결정 (수정된 부분)
-        cpi_option = "-cpi prev.cpt" if enable_cpi else ""
+        cpi_option = "-cpi prev.cpt -noappend" if enable_cpi else ""
         cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md {cpi_option} -ntomp {NTOMP} \
               -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
         
