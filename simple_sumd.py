@@ -1092,8 +1092,7 @@ pcoupl = no ; No pressure coupling during ion insertion
         cmd, work_dir, expected_output="em.tpr"
     )
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm em -ntomp {NTOMP} \
-          -nb gpu -gpu_id {GPU_ID}"
+        cmd = f"gmx mdrun -v -deffnm em -ntomp {NTOMP} -nb gpu -gpu_id {GPU_ID}"
         success, returncode, stderr = run_command_with_output_check(
             cmd, work_dir, expected_output=["em.gro", "em.edr"]
             )
@@ -1105,8 +1104,7 @@ pcoupl = no ; No pressure coupling during ion insertion
     cmd = f"gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -o nvt.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="nvt.tpr")
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm nvt -ntomp {NTOMP} \
-          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
+        cmd = f"gmx mdrun -v -deffnm nvt -ntomp {NTOMP} -nb gpu -gpu_id {GPU_ID} -pme gpu -bonded gpu"
         success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["nvt.gro", "nvt.cpt"])
     else:
         raise RuntimeError(f"nvt 실패: {stderr}")
@@ -1116,8 +1114,7 @@ pcoupl = no ; No pressure coupling during ion insertion
     cmd = f"gmx grompp -f npt1.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -o npt1.tpr -maxwarn {MAX_WARNINGS}"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt1.tpr")
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt1 -ntomp {NTOMP} \
-          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
+        cmd = f"gmx mdrun -v -deffnm npt1 -ntomp {NTOMP} -nb gpu -gpu_id {GPU_ID} -pme gpu -bonded gpu"
         success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt1.gro", "npt1.cpt"])
     else:
         raise RuntimeError(f"npt1 실패: {stderr}")
@@ -1127,8 +1124,7 @@ pcoupl = no ; No pressure coupling during ion insertion
     cmd =f"gmx grompp -f npt2.mdp -c npt1.gro -t npt1.cpt -r npt1.gro -p topol.top -o npt2.tpr"
     success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output="npt2.tpr")
     if success:
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm npt2 -ntomp {NTOMP} \
-          -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
+        cmd = f"gmx mdrun -v -deffnm npt2 -ntomp {NTOMP} -nb gpu -gpu_id {GPU_ID} -pme gpu -bonded gpu"
         success, returncode, stderr = run_command_with_output_check(cmd, work_dir, expected_output=["npt2.gro", "npt2.cpt"])
     else:
         raise RuntimeError(f"npt2 실패: {stderr}")
@@ -1173,7 +1169,7 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
         
         # 이전 체크포인트 복사
         local_prev_gro = os.path.join(work_dir, "prev.gro")
-        # local_prev_cpt = os.path.join(work_dir, "prev.cpt")
+        local_prev_cpt = os.path.join(work_dir, "prev.cpt")
         local_topology = os.path.join(work_dir, "topol.top")
         
         # logger.info(f"prev_gro : {prev_gro}, prev_cpt : {prev_cpt}, topology : {topology}")
@@ -1197,7 +1193,7 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
         logger.info("STEP 2: CPT 파일 체크 시작")
         if prev_cpt is not None:
             logger.info("STEP 2-1: CPT 파일 복사 시작")
-            # shutil.copy(prev_cpt, local_prev_cpt)
+            shutil.copy(prev_cpt, local_prev_cpt)
             logger.info("STEP 2-1 완료")
         else:
             logger.info("STEP 2-2: CPT가 None이므로 복사 건너뜀")
