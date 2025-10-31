@@ -31,8 +31,8 @@ STRUCTURE_ROTATION = 120     # 랜덤 최대 각도
 
 # ===== GROMACS 설정 =====
 GPU_ID = "12"                 #  사용할 GPU ID
-MPI_RANKS = "2"              # MPI 랭크 수
-NTOMP = "1"                  # OpenMP 스레드 수
+MPI_RANKS = "1"              # MPI 랭크 수
+NTOMP = "8"                  # OpenMP 스레드 수
 FORCE_FIELD = "charmm36-jul2022"  # Force field
 WATER_MODEL = "tip3p"        # 물 모델
 # TIMEOUT_GROMACS = 999999999999999999999999999       # 기본 GROMACS 명령어 타임아웃

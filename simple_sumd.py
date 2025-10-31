@@ -1173,7 +1173,7 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
         
         # 이전 체크포인트 복사
         local_prev_gro = os.path.join(work_dir, "prev.gro")
-        local_prev_cpt = os.path.join(work_dir, "prev.cpt")
+        # local_prev_cpt = os.path.join(work_dir, "prev.cpt")
         local_topology = os.path.join(work_dir, "topol.top")
         
         # logger.info(f"prev_gro : {prev_gro}, prev_cpt : {prev_cpt}, topology : {topology}")
@@ -1197,7 +1197,7 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
         logger.info("STEP 2: CPT 파일 체크 시작")
         if prev_cpt is not None:
             logger.info("STEP 2-1: CPT 파일 복사 시작")
-            shutil.copy(prev_cpt, local_prev_cpt)
+            # shutil.copy(prev_cpt, local_prev_cpt)
             logger.info("STEP 2-1 완료")
         else:
             logger.info("STEP 2-2: CPT가 None이므로 복사 건너뜀")
@@ -1214,8 +1214,8 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
 
         # 1. grompp
         logger.info(f"1/2: MD grompp 실행")
-        cpt_option = "-t prev.cpt" if enable_cpi else ""
-        cmd = f"gmx grompp -f md.mdp -c prev.gro {cpt_option} -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
+        # cpt_option = "-t prev.cpt" if enable_cpi else ""
+        cmd = f"gmx grompp -f md.mdp -c prev.gro -p topol.top -o md.tpr -maxwarn {MAX_WARNINGS}"
         success, returncode, stderr = run_command_with_output_check(
             cmd, work_dir, expected_output="md.tpr"
         )
@@ -1228,9 +1228,8 @@ def run_sumd_cycle(work_dir, prev_gro, prev_cpt, topology, itp_files, cycle_num,
         logger.info(f"2/2: {md_label} 실행 {'(체크포인트 연속)' if enable_cpi else '(새로 시작)'}")
         
         # enable_cpi에 따라 -cpi 옵션 추가 여부 결정 (수정된 부분)
-        cpi_option = "-cpi prev.cpt -noappend" if enable_cpi else ""
-        cmd = f"mpirun --allow-run-as-root -np {MPI_RANKS} gmx_mpi mdrun -v -deffnm md {cpi_option} -ntomp {NTOMP} \
-              -nb gpu -gpu_id {GPU_ID} -npme {NPME} -pme gpu -bonded gpu"
+        # cpi_option = "-cpi prev.cpt -noappend" if enable_cpi else ""
+        cmd = f"gmx mdrun -v -deffnm md -ntomp {NTOMP} -nb gpu -gpu_id {GPU_ID} -pme gpu -bonded gpu"
         
         success, returncode, stderr = run_command_with_output_check(
             cmd, 
@@ -1302,7 +1301,7 @@ def create_md_mdp_files(work_dir, cpi_option=True, long_md=False):
         md_settings = {"integrator": "sd", "dt": 0.002, "temperature": 300, "pressure": 1.0}
         md_output_freq={"energy": 5000, "log": 5000, "trajectory": 5000}
 
-    continuation_opt = "yes" if cpi_option else "no"
+    continuation_opt = "no"
     
     # MD MDP - SD integrator with random seed
     simulation_time = LONG_MD_TIME_NS if long_md else SIMULATION_TIME_NS
@@ -1315,7 +1314,7 @@ dt = 0.002 ; Time step size of 2 fs
 
 ; Output control
 nstxout-compressed = {md_output_freq["trajectory"]} ; (optimize traj size)
-nstvout = 1000 ; Save velocities every 2 ps
+nstvout = {md_output_freq["log"]} ; Save velocities every 2 ps
 nstenergy = {md_output_freq["energy"]}
 nstlog = {md_output_freq["log"]}
 
