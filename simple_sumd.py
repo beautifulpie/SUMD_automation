@@ -2103,8 +2103,8 @@ def save_final_structure(structure_results, struct_dir, first_dir):
     if not (structure_results["iterations"] and structure_results["iterations"][-1]["success"]):
         return
     
-    final_result = structure_results["iterations"][-1]["final_result"]
-    final_gro = final_result.get("gro_file")
+    final_result = structure_results["iterations"][-1]["final_result"]["cycle_result"]
+    final_gro = final_result.get("gro")
     
     if not final_gro or not os.path.exists(final_gro):
         logger.warning("최종 .gro 파일을 찾을 수 없음")
