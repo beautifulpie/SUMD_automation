@@ -69,43 +69,234 @@ def find_successful_attempt(iteration_dir, iteration_summary):
                 return attempt_dir, attempt_num
     
     return None
-def concatenate_trajectories_to_xtc(trajectory_files, output_xtc, temp_dir):
-    """여러 XTC 파일들을 하나의 XTC로 연결"""
-    if not trajectory_files:
+
+def get_trajectory_time_info(tpr_file, xtc_file, work_dir):
+    """XTC 파일의 시간 정보 추출"""
+    try:
+        cmd = f"gmx check -f {xtc_file} 2>&1"
+        result = subprocess.run(
+            cmd, shell=True, cwd=work_dir,
+            capture_output=True, text=True, timeout=30
+        )
+        
+        # Reading frame 출력에서 시작/끝 시간 추출
+        output = result.stdout + result.stderr
+        lines = output.split('\n')
+        
+        start_time = 0.0
+        end_time = 0.0
+        
+        for line in lines:
+            if 'time' in line.lower() and 'last frame' in line.lower():
+                # "time 300.000 ps" 같은 형식에서 시간 추출
+                import re
+                times = re.findall(r'(\d+\.?\d*)\s*', line)
+                if times:
+                    end_time = float(times[-1])
+        
+        # 또는 gmx dump로 정확한 정보 확인
+        if end_time == 0.0:
+            cmd = f"gmx dump -f {xtc_file} 2>&1 | grep 'time' | tail -1"
+            result = subprocess.run(
+                cmd, shell=True, cwd=work_dir,
+                capture_output=True, text=True, timeout=30
+            )
+            import re
+            times = re.findall(r'(\d+\.?\d*)', result.stdout)
+            if times:
+                end_time = float(times[-1])
+        
+        return start_time, end_time
+        
+    except Exception as e:
+        print(f"  ⚠ 시간 정보 추출 실패: {e}")
+        # 기본값: 설정 파일의 시뮬레이션 시간 사용
+        try:
+            from simple_config import SIMULATION_TIME_NS, LONG_MD_TIME_NS
+            return 0.0, SIMULATION_TIME_NS * 1000  # ns -> ps
+        except:
+            return 0.0, 300.0  # 기본 300ps
+
+def create_protein_ligand_index(tpr_file, work_dir):
+    """Protein + Ligand 그룹 생성 (물과 이온 제외)"""
+    try:
+        ndx_file = os.path.join(work_dir, "protein_ligand.ndx")
+        
+        # System에서 물(SOL)과 주요 이온들(NA, CL, K, MG, CA) 제외
+        # GROMACS make_ndx로 새 그룹 생성
+        create_cmd = (
+            f'printf "! r SOL & ! r NA & ! r CL & ! r K & ! r MG & ! r CA\\n'
+            f'name {13} Protein_Ligand\\n'  # 새 그룹 이름 지정
+            f'q\\n" | gmx make_ndx -f {tpr_file} -o {ndx_file} 2>&1'
+        )
+        
+        result = subprocess.run(
+            create_cmd, shell=True, cwd=work_dir,
+            capture_output=True, text=True, timeout=60
+        )
+        
+        if result.returncode != 0 or not os.path.exists(ndx_file):
+            # 실패 시 기본 Protein 그룹으로 폴백
+            print(f"  ⚠ 커스텀 인덱스 생성 실패, Protein 그룹 사용")
+            return None, "Protein"
+        
+        # 생성된 그룹 번호 확인 (보통 마지막 그룹)
+        # 출력에서 그룹 번호 파싱
+        lines = result.stdout.split('\n')
+        group_num = None
+        for line in lines:
+            if 'Protein_Ligand' in line:
+                # "13 Protein_Ligand" 형태에서 번호 추출
+                parts = line.strip().split()
+                if len(parts) >= 2:
+                    try:
+                        group_num = int(parts[0])
+                        break
+                    except:
+                        pass
+        
+        if group_num is None:
+            # 파싱 실패 시 기본값 13 사용 (일반적인 경우)
+            group_num = 13
+        
+        print(f"  ✓ Protein+Ligand 그룹 생성 완료 (그룹 {group_num})")
+        return ndx_file, str(group_num)
+        
+    except Exception as e:
+        print(f"  ⚠ 인덱스 파일 생성 중 오류: {e}")
+        return None, "Protein"
+
+def adjust_trajectory_time(input_xtc, output_xtc, start_time_offset, tpr_file, work_dir):
+    """XTC 파일의 시간을 오프셋만큼 조정하고 Protein+Ligand만 추출 (물, 이온 제외)"""
+    try:
+        # Protein + Ligand 인덱스 파일 생성
+        ndx_file, group_selection = create_protein_ligand_index(tpr_file, work_dir)
+        
+        # trjconv로 선택한 그룹만 추출하고 시작 시간 조정 (ps 단위)
+        if ndx_file:
+            # 커스텀 인덱스 파일 사용
+            cmd = f"echo '{group_selection}' | gmx trjconv -s {tpr_file} -f {input_xtc} -o {output_xtc} -t0 {start_time_offset} -n {ndx_file}"
+        else:
+            # 폴백: Protein만 (리간드가 Protein 그룹에 포함된 경우도 있음)
+            cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {input_xtc} -o {output_xtc} -t0 {start_time_offset}"
+        
+        result = subprocess.run(
+            cmd, shell=True, cwd=work_dir,
+            capture_output=True, text=True, timeout=3600
+        )
+        
+        if result.returncode != 0:
+            print(f"  ⚠ Protein+Ligand 추출 및 시간 조정 실패: {result.stderr}")
+            return False
+        
+        # 임시 인덱스 파일 정리
+        if ndx_file and os.path.exists(ndx_file):
+            os.remove(ndx_file)
+        
+        return True
+        
+    except Exception as e:
+        print(f"  ⚠ Protein+Ligand 추출 및 시간 조정 중 오류: {e}")
         return False
     
-    print(f"  XTC 파일 연결 중: {len(trajectory_files)}개 궤적")
+def concatenate_trajectories_to_xtc(trajectory_info_list, output_xtc, temp_dir):
+    """
+    여러 XTC 파일들을 시간 보정하여 하나의 XTC로 연결 (Protein + Ligand만, 물/이온 제외)
     
-    # trjcat으로 여러 XTC를 하나로 연결
-    traj_list = " ".join(trajectory_files)
-    cmd = f"gmx trjcat -f {traj_list} -o {output_xtc} -settime"
+    Args:
+        trajectory_info_list: [(xtc_file, tpr_file, is_long_md, iter_num), ...] 형식의 리스트
+        output_xtc: 출력 XTC 파일 경로
+        temp_dir: 임시 작업 디렉토리
+    """
+    if not trajectory_info_list:
+        return False, {}
     
-    # settime 입력: 모든 프레임을 연속적으로 (0 입력)
-    input_text = "0\n" * len(trajectory_files)
+    print(f"  XTC 파일 시간 보정 및 연결 중: {len(trajectory_info_list)}개 궤적")
+    print(f"  추출 대상: Protein + Ligand (물, 이온 제외)")
+    
+    adjusted_files = []
+    time_info = {
+        "iterations": [],
+        "total_time_ps": 0.0
+    }
+    
+    cumulative_time = 0.0  # 누적 시간 (ps)
+    
+    # 1단계: 각 XTC의 시간 보정 및 Protein+Ligand 추출
+    for idx, (src_xtc, src_tpr, is_long_md, iter_num) in enumerate(trajectory_info_list):
+        print(f"  처리 중: Iteration {iter_num} (시작 시간: {cumulative_time:.1f} ps)")
+        
+        # 원본 XTC의 시간 범위 확인
+        start_time, end_time = get_trajectory_time_info(src_tpr, src_xtc, temp_dir)
+        duration = end_time - start_time
+        
+        print(f"    원본 시간 범위: {start_time:.1f} - {end_time:.1f} ps (길이: {duration:.1f} ps)")
+        
+        # 시간 조정 및 Protein+Ligand 추출된 XTC 생성
+        adjusted_xtc = os.path.join(temp_dir, f"adjusted_{idx:03d}.xtc")
+        
+        if adjust_trajectory_time(src_xtc, adjusted_xtc, cumulative_time, src_tpr, temp_dir):
+            adjusted_files.append(adjusted_xtc)
+            
+            # 시간 정보 기록
+            iter_info = {
+                "iteration": iter_num,
+                "start_time_ps": cumulative_time,
+                "end_time_ps": cumulative_time + duration,
+                "duration_ps": duration,
+                "is_long_md": is_long_md
+            }
+            time_info["iterations"].append(iter_info)
+            
+            print(f"    ✓ 조정 완료: {cumulative_time:.1f} - {cumulative_time + duration:.1f} ps")
+            
+            # 다음 iteration의 시작 시간 설정
+            cumulative_time += duration
+        else:
+            print(f"    ✗ 시간 조정 실패, 건너뜀")
+            return False, {}
+    
+    time_info["total_time_ps"] = cumulative_time
+    time_info["total_time_ns"] = cumulative_time / 1000.0
+    
+    print(f"\n  총 시뮬레이션 시간: {time_info['total_time_ns']:.2f} ns")
+    
+    # 2단계: 조정된 XTC들을 하나로 연결
+    if not adjusted_files:
+        return False, {}
+    
+    print(f"\n  최종 XTC 연결 중...")
+    traj_list = " ".join(adjusted_files)
+    
+    # trjcat으로 연결 (시간이 이미 조정되었으므로 -settime 불필요)
+    cmd = f"gmx trjcat -f {traj_list} -o {output_xtc} -cat"
     
     try:
         result = subprocess.run(
             cmd, shell=True, cwd=temp_dir,
-            input=input_text.encode(), 
-            capture_output=True, text=True
+            capture_output=True, text=True, timeout=3600
         )
         if result.returncode != 0:
             print(f"  ⚠ XTC 연결 실패: {result.stderr}")
-            return False
-        return True
+            return False, {}
+        
+        print(f"  ✓ 최종 XTC 생성 완료 (Protein + Ligand만 포함)")
+        return True, time_info
+        
     except Exception as e:
         print(f"  ⚠ XTC 연결 중 오류: {e}")
-        return False
-
+        return False, {}
+    
 def collect_trajectories_as_xtc(sumd_output_dir, output_dir="collected_trajectories"):
     """
-    SuMD 시뮬레이션의 모든 성공한 attempt 궤적을 XTC 파일로 수집
+    SuMD 시뮬레이션의 모든 성공한 attempt 궤적을 시간 보정하여 XTC 파일로 수집
+    (Protein + Ligand만 포함, 물과 이온 제외)
     
     Args:
         sumd_output_dir: SuMD 출력 디렉토리 경로
         output_dir: 수집된 궤적을 저장할 디렉토리 이름
     """
-    print(f"SuMD 궤적 XTC 수집 시작: {sumd_output_dir}")
+    print(f"SuMD 궤적 XTC 수집 시작 (시간 보정, Protein+Ligand만): {sumd_output_dir}")
     
     # 출력 디렉토리 생성
     full_output_dir = os.path.join(sumd_output_dir, output_dir)
@@ -121,10 +312,11 @@ def collect_trajectories_as_xtc(sumd_output_dir, output_dir="collected_trajector
         "collection_time": datetime.now().isoformat(),
         "source_directory": sumd_output_dir,
         "format": "xtc",
+        "time_corrected": True,
         "iterations": []
     }
     
-    trajectory_files = []  # 연결할 XTC 파일들
+    trajectory_info_list = []  # [(xtc, tpr, is_long_md, iter_num), ...]
     
     # 1. 초기 구조 (target_chains.pdb) -> initial_structure.pdb
     target_chains_path = os.path.join(sumd_output_dir, "target_chains.pdb")
@@ -157,7 +349,7 @@ def collect_trajectories_as_xtc(sumd_output_dir, output_dir="collected_trajector
     print(f"발견된 iteration 디렉토리 수: {len(iteration_dirs)}")
     
     for iter_num, iter_dir in iteration_dirs:
-        print(f"\n=== Iteration {iter_num} 처리 중 ===")
+        print(f"\n=== Iteration {iter_num} 정보 수집 중 ===")
         
         iter_path = os.path.join(sumd_output_dir, iter_dir)
         summary_file = os.path.join(sumd_output_dir, f"{iter_dir}_summary.json")
@@ -184,7 +376,7 @@ def collect_trajectories_as_xtc(sumd_output_dir, output_dir="collected_trajector
         attempt_dir, attempt_num = attempt_info
         print(f"  ✓ 성공한 attempt: {attempt_num}")
         
-        # XTC 파일 직접 복사
+        # XTC/TPR 파일 확인
         src_xtc = os.path.join(attempt_dir, "md.xtc")
         src_tpr = os.path.join(attempt_dir, "md.tpr")
         
@@ -192,19 +384,19 @@ def collect_trajectories_as_xtc(sumd_output_dir, output_dir="collected_trajector
             print(f"  ⚠ Iteration {iter_num}: XTC 또는 TPR 파일이 없습니다")
             continue
         
-        # 임시 디렉토리에 복사
-        temp_xtc = os.path.join(temp_dir, f"iter_{iter_num:03d}.xtc")
-        shutil.copy(src_xtc, temp_xtc)
-        trajectory_files.append(temp_xtc)
+        is_long_md = iteration_summary.get("long_md", False)
         
-        # iteration 정보 기록
+        # 궤적 정보 리스트에 추가
+        trajectory_info_list.append((src_xtc, src_tpr, is_long_md, iter_num))
+        
+        # iteration 기본 정보 기록 (시간 정보는 나중에 추가)
         iteration_info = {
             "type": "md_trajectory",
             "iteration_number": iter_num,
             "attempt_number": attempt_num,
             "source": f"{iter_dir}/attempt_{attempt_num}/md.xtc",
             "description": f"Iteration {iter_num} MD 궤적 (Attempt {attempt_num})",
-            "is_long_md": iteration_summary.get("long_md", False)
+            "is_long_md": is_long_md
         }
         
         # summary에서 추가 정보
@@ -219,31 +411,39 @@ def collect_trajectories_as_xtc(sumd_output_dir, output_dir="collected_trajector
         
         collected_info["iterations"].append(iteration_info)
         
-        long_md_mark = "(Long MD)" if iteration_info.get("is_long_md") else ""
-        print(f"  ✓ XTC 파일 추가: iter_{iter_num:03d}.xtc {long_md_mark}")
+        long_md_mark = "(Long MD)" if is_long_md else ""
+        print(f"  ✓ 궤적 추가 대기: iter_{iter_num:03d} {long_md_mark}")
     
-    # 모든 궤적을 하나의 XTC로 연결
-    if trajectory_files:
+    # 모든 궤적을 시간 보정하여 하나의 XTC로 연결
+    if trajectory_info_list:
         final_xtc = os.path.join(full_output_dir, "complete_trajectory.xtc")
-        print(f"\n연속 궤적 생성 중: {len(trajectory_files)}개 XTC 연결...")
+        print(f"\n{'='*60}")
+        print(f"시간 보정 및 연속 궤적 생성 시작")
+        print(f"{'='*60}")
         
-        if concatenate_trajectories_to_xtc(trajectory_files, final_xtc, temp_dir):
-            print(f"✓ 연속 궤적 생성 완료: complete_trajectory.xtc")
+        success, time_info = concatenate_trajectories_to_xtc(
+            trajectory_info_list, final_xtc, temp_dir
+        )
+        
+        if success:
+            print(f"\n✓ 연속 궤적 생성 완료: complete_trajectory.xtc")
+            print(f"  총 시뮬레이션 시간: {time_info['total_time_ns']:.2f} ns ({time_info['total_time_ps']:.1f} ps)")
+            
             collected_info["trajectory_file"] = "complete_trajectory.xtc"
-            collected_info["total_iterations"] = len(trajectory_files)
+            collected_info["total_iterations"] = len(trajectory_info_list)
+            collected_info["time_info"] = time_info
+            
+            # 각 iteration 정보에 시간 정보 추가
+            for i, iter_info in enumerate(collected_info["iterations"]):
+                if i < len(time_info["iterations"]):
+                    iter_info.update(time_info["iterations"][i])
             
             # 첫 번째 TPR 파일도 복사 (시각화용)
-            first_iter_dir = os.path.join(sumd_output_dir, iteration_dirs[0][1])
-            first_attempt_info = find_successful_attempt(
-                first_iter_dir, 
-                json.load(open(os.path.join(sumd_output_dir, f"{iteration_dirs[0][1]}_summary.json")))
-            )
-            if first_attempt_info:
-                first_tpr = os.path.join(first_attempt_info[0], "md.tpr")
-                ref_tpr = os.path.join(full_output_dir, "reference.tpr")
-                shutil.copy(first_tpr, ref_tpr)
-                collected_info["reference_tpr"] = "reference.tpr"
-                print(f"✓ 참조 TPR 저장: reference.tpr")
+            first_tpr = trajectory_info_list[0][1]
+            ref_tpr = os.path.join(full_output_dir, "reference.tpr")
+            shutil.copy(first_tpr, ref_tpr)
+            collected_info["reference_tpr"] = "reference.tpr"
+            print(f"✓ 참조 TPR 저장: reference.tpr")
         else:
             print(f"⚠ XTC 연결 실패")
     
@@ -256,27 +456,37 @@ def collect_trajectories_as_xtc(sumd_output_dir, output_dir="collected_trajector
     with open(info_file, 'w') as f:
         json.dump(collected_info, f, indent=2, ensure_ascii=False)
     
-    # 요약 텍스트 파일 생성
+    # 요약 텍스트 파일 생성 부분 수정
     summary_file = os.path.join(full_output_dir, "trajectory_summary.txt")
     with open(summary_file, 'w', encoding='utf-8') as f:
-        f.write(f"SuMD 궤적 요약 (XTC 형식)\n")
+        f.write(f"SuMD 궤적 요약 (XTC 형식, 시간 보정 적용)\n")
+        f.write(f"포함: Protein + Ligand\n")
+        f.write(f"제외: 물(SOL), 이온(NA, CL, K, MG, CA)\n")
         f.write(f"수집 시간: {collected_info['collection_time']}\n")
         f.write(f"처리된 iteration 수: {collected_info.get('total_iterations', 0)}\n")
+        f.write(f"총 시뮬레이션 시간: {collected_info.get('time_info', {}).get('total_time_ns', 0):.2f} ns\n")
         f.write(f"출력 파일: complete_trajectory.xtc\n")
-        f.write("="*50 + "\n\n")
+        f.write("="*60 + "\n\n")
         
+        f.write("시간별 Iteration 정보:\n")
+        f.write("-"*60 + "\n")
         for info in collected_info["iterations"]:
-            f.write(f"Iteration {info['iteration_number']}: {info['description']}\n")
+            f.write(f"\nIteration {info['iteration_number']}: {info['description']}\n")
+            if 'start_time_ps' in info:
+                f.write(f"  - 시간 범위: {info['start_time_ps']:.1f} - {info['end_time_ps']:.1f} ps\n")
+                f.write(f"  - 지속 시간: {info['duration_ps']:.1f} ps ({info['duration_ps']/1000:.2f} ns)\n")
             if 'min_distance' in info:
                 f.write(f"  - 최소거리: {info['min_distance']:.2f}Å\n")
             if 'slope' in info:
                 f.write(f"  - 기울기: {info['slope']:.6f}\n")
             if info.get("is_long_md"):
                 f.write(f"  - Long MD 궤적\n")
-            f.write("\n")
     
-    print(f"\n=== 수집 완료 ===")
+    print(f"\n{'='*60}")
+    print(f"수집 완료")
+    print(f"{'='*60}")
     print(f"처리된 iteration 수: {collected_info.get('total_iterations', 0)}")
+    print(f"총 시뮬레이션 시간: {collected_info.get('time_info', {}).get('total_time_ns', 0):.2f} ns")
     print(f"저장 위치: {full_output_dir}")
     print(f"궤적 파일: complete_trajectory.xtc")
     print(f"상세 정보: {info_file}")
