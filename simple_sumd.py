@@ -714,6 +714,15 @@ def define_binding_site(input_pdb, ligand_chain, receptor_chain, distance_cutoff
 
     ligand_atoms = []
     receptor_residues = set()
+
+    # 수동으로 지정된 binding site가 있는지 확인
+    try:
+        if BINDING_SITE_RESIDUES and len(BINDING_SITE_RESIDUES) > 0:
+            logger.info(f"🔸 수동 지정된 Binding site 사용: {BINDING_SITE_RESIDUES}")
+            return BINDING_SITE_RESIDUES
+        
+    except NameError:
+        pass  # BINDING_SITE_RESIDUES 설정이 없으면 자동 탐지
     
     for model in structure:
         for chain in model:
