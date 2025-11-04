@@ -173,7 +173,7 @@ def adjust_trajectory_time(input_xtc, output_xtc, start_time_offset, tpr_file, w
         ndx_file, group_selection = create_protein_ligand_index(tpr_file, work_dir)
         
         # trjconv로 선택한 그룹만 추출하고 시작 시간 조정 (ps 단위)
-        if ndx_file:
+        if False:
             # 커스텀 인덱스 파일 사용
             cmd = f"echo '{group_selection}' | gmx trjconv -s {tpr_file} -f {input_xtc} -o {output_xtc} -t0 {start_time_offset} -n {ndx_file}"
         else:
