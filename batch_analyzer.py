@@ -709,7 +709,7 @@ class BatchAnalyzer:
         print("Step 4: Outputting analysis results...")
         self.print_comprehensive_summary()
         self.analyze_timing_patterns()
-        self.analyze_failure_patterns()
+        
         
         # 5단계: 그래프 및 보고서 생성
         print("Step 5: Generating visualization and reports...")
@@ -1045,41 +1045,6 @@ class BatchAnalyzer:
         except Exception as e:
             print(f"타이밍 정보 추출 실패 {folder_path}: {e}")
             return timing_info
-
-    def analyze_failure_patterns(self):
-        """실패 패턴 분석"""
-        print(f"\n🔍 Failure Pattern Analysis:")
-        print("-" * 50)
-        
-        # GROMACS 단계별 실패 분석
-        stage_stats = defaultdict(lambda: {'total': 0, 'success': 0})
-        
-        for attempt in self.data['attempt_results']:
-            stages = attempt.get('stages', [])
-            for stage in stages:
-                stage_name = stage.get('stage', 'unknown')
-                stage_stats[stage_name]['total'] += 1
-                if stage.get('success', False):
-                    stage_stats[stage_name]['success'] += 1
-        
-        print("GROMACS Stage Success Rates:")
-        for stage, stats in sorted(stage_stats.items()):
-            if stats['total'] > 0:
-                success_rate = stats['success'] / stats['total'] * 100
-                print(f"  • {stage}: {success_rate:.1f}% ({stats['success']}/{stats['total']})")
-        
-        # 실패 이유 분석
-        failure_reasons = defaultdict(int)
-        for attempt in self.data['attempt_results']:
-            if not attempt.get('success', False):
-                reason = attempt.get('reason', 'unknown')
-                failure_reasons[reason] += 1
-        
-        if failure_reasons:
-            print(f"\nFailure Reason Distribution:")
-            total_failures = sum(failure_reasons.values())
-            for reason, count in sorted(failure_reasons.items(), key=lambda x: x[1], reverse=True):
-                print(f"  • {reason}: {count} times ({count/total_failures*100:.1f}%)")
 
     def analyze_timing_patterns(self):
         """시간 패턴 분석"""
