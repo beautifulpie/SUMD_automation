@@ -1123,19 +1123,6 @@ class BatchAnalyzer:
                     f.write(f"  최고 구조: {pdb_data.get('best_structure_name', 'N/A')}\n")
                     f.write("\n")
             
-            # 실패 패턴 분석
-            f.write("4. 실패 패턴 분석\n")
-            f.write("-" * 40 + "\n")
-            
-            stage_stats = defaultdict(lambda: {'total': 0, 'success': 0})
-            for attempt in self.data['attempt_results']:
-                stages = attempt.get('stages', [])
-                for stage in stages:
-                    stage_name = stage.get('stage', 'unknown')
-                    stage_stats[stage_name]['total'] += 1
-                    if stage.get('success', False):
-                        stage_stats[stage_name]['success'] += 1
-            
             f.write("GROMACS 단계별 성공률:\n")
             for stage, stats in sorted(stage_stats.items()):
                 if stats['total'] > 0:
@@ -1154,7 +1141,7 @@ class BatchAnalyzer:
                 f.write(f"  {reason}: {count}회 ({count/total_failures*100:.1f}%)\n")
             
             # 긴 MD 통계
-            f.write("\n5. 긴 MD 통계\n")
+            f.write("\n4. 긴 MD 통계\n")
             f.write("-" * 40 + "\n")
             
             long_md_attempts = [a for a in self.data['attempt_results'] if a.get('long_md_executed', False)]
