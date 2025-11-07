@@ -751,17 +751,14 @@ def main():
         return 1
     
     # SuMD 출력 디렉토리인지 확인
-    target_chains = os.path.join(input_dir, "target_chains.pdb")
-    iteration_dirs = [f for f in os.listdir(input_dir) 
-                     if f.startswith("iteration_") and os.path.isdir(os.path.join(input_dir, f))]
+    iteration_dirs = find_all_structure_directories(input_dir)
     
-    if not os.path.exists(target_chains) and not iteration_dirs:
+    if not iteration_dirs:
         print(f"❌ SuMD 출력 디렉토리가 아닌 것 같습니다: {input_dir}")
         print("   target_chains.pdb 또는 iteration_ 디렉토리들이 없습니다.")
         return 1
     
     print(f"📁 입력 디렉토리: {input_dir}")
-    print(f"📄 Target chains: {'✓' if os.path.exists(target_chains) else '✗'}")
     print(f"📂 Iteration 디렉토리 수: {len(iteration_dirs)}")
     print(f"📊 출력 형식: {args.format.upper()}")
     
