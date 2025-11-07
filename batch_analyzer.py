@@ -1123,23 +1123,6 @@ class BatchAnalyzer:
                     f.write(f"  최고 구조: {pdb_data.get('best_structure_name', 'N/A')}\n")
                     f.write("\n")
             
-            f.write("GROMACS 단계별 성공률:\n")
-            for stage, stats in sorted(stage_stats.items()):
-                if stats['total'] > 0:
-                    success_rate = stats['success'] / stats['total'] * 100
-                    f.write(f"  {stage}: {success_rate:.1f}% ({stats['success']}/{stats['total']})\n")
-            
-            f.write("\n실패 이유 분포:\n")
-            failure_reasons = defaultdict(int)
-            for attempt in self.data['attempt_results']:
-                if not attempt.get('success', False):
-                    reason = attempt.get('reason', 'unknown')
-                    failure_reasons[reason] += 1
-            
-            total_failures = sum(failure_reasons.values())
-            for reason, count in sorted(failure_reasons.items(), key=lambda x: x[1], reverse=True):
-                f.write(f"  {reason}: {count}회 ({count/total_failures*100:.1f}%)\n")
-            
             # 긴 MD 통계
             f.write("\n4. 긴 MD 통계\n")
             f.write("-" * 40 + "\n")
