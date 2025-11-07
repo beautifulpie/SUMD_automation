@@ -117,91 +117,30 @@ def get_trajectory_time_info(tpr_file, xtc_file, work_dir):
         except:
             return 0.0, 300.0  # 기본 300ps
 
-def create_protein_ligand_index(tpr_file, work_dir):
-    """Protein + Ligand 그룹 생성 (물과 이온 제외)"""
-    try:
-        ndx_file = os.path.join(work_dir, "protein_ligand.ndx")
-        
-        # System에서 물(SOL)과 주요 이온들(NA, CL, K, MG, CA) 제외
-        # GROMACS make_ndx로 새 그룹 생성
-        create_cmd = (
-            f'printf "! r SOL & ! r NA & ! r CL & ! r K & ! r MG & ! r CA\\n'
-            f'name {13} Protein_Ligand\\n'  # 새 그룹 이름 지정
-            f'q\\n" | gmx make_ndx -f {tpr_file} -o {ndx_file} 2>&1'
-        )
-        
-        result = subprocess.run(
-            create_cmd, shell=True, cwd=work_dir,
-            capture_output=True, text=True, timeout=60
-        )
-        
-        if result.returncode != 0 or not os.path.exists(ndx_file):
-            # 실패 시 기본 Protein 그룹으로 폴백
-            print(f"  ⚠ 커스텀 인덱스 생성 실패, Protein 그룹 사용")
-            return None, "Protein"
-        
-        # 생성된 그룹 번호 확인 (보통 마지막 그룹)
-        # 출력에서 그룹 번호 파싱
-        lines = result.stdout.split('\n')
-        group_num = None
-        for line in lines:
-            if 'Protein_Ligand' in line:
-                # "13 Protein_Ligand" 형태에서 번호 추출
-                parts = line.strip().split()
-                if len(parts) >= 2:
-                    try:
-                        group_num = int(parts[0])
-                        break
-                    except:
-                        pass
-        
-        if group_num is None:
-            # 파싱 실패 시 기본값 13 사용 (일반적인 경우)
-            group_num = 13
-        
-        print(f"  ✓ Protein+Ligand 그룹 생성 완료 (그룹 {group_num})")
-        return ndx_file, str(group_num)
-        
-    except Exception as e:
-        print(f"  ⚠ 인덱스 파일 생성 중 오류: {e}")
-        return None, "Protein"
-
 def adjust_trajectory_time(input_xtc, output_xtc, start_time_offset, tpr_file, work_dir):
-    """XTC 파일의 시간을 오프셋만큼 조정하고 Protein+Ligand만 추출 (물, 이온 제외)"""
+    """XTC 파일의 시간을 오프셋만큼 조정"""
     try:
-        # Protein + Ligand 인덱스 파일 생성
-        ndx_file, group_selection = create_protein_ligand_index(tpr_file, work_dir)
-        
-        # trjconv로 선택한 그룹만 추출하고 시작 시간 조정 (ps 단위)
-        if False:
-            # 커스텀 인덱스 파일 사용
-            cmd = f"echo '{group_selection}' | gmx trjconv -s {tpr_file} -f {input_xtc} -o {output_xtc} -t0 {start_time_offset} -n {ndx_file}"
-        else:
-            # 폴백: Protein만 (리간드가 Protein 그룹에 포함된 경우도 있음)
-            cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {input_xtc} -o {output_xtc} -t0 {start_time_offset}"
-        
+        # 폴백: Protein만 (리간드가 Protein 그룹에 포함된 경우도 있음)
+        cmd = f"echo 'Protein' | gmx trjconv -s {tpr_file} -f {input_xtc} -o {output_xtc} -t0 {start_time_offset}"
+    
         result = subprocess.run(
             cmd, shell=True, cwd=work_dir,
             capture_output=True, text=True, timeout=3600
         )
         
         if result.returncode != 0:
-            print(f"  ⚠ Protein+Ligand 추출 및 시간 조정 실패: {result.stderr}")
+            print(f"  ⚠ 시간 조정 실패: {result.stderr}")
             return False
-        
-        # 임시 인덱스 파일 정리
-        if ndx_file and os.path.exists(ndx_file):
-            os.remove(ndx_file)
-        
+            
         return True
         
     except Exception as e:
-        print(f"  ⚠ Protein+Ligand 추출 및 시간 조정 중 오류: {e}")
+        print(f"  ⚠ 시간 조정 중 오류: {e}")
         return False
     
 def concatenate_trajectories_to_xtc(trajectory_info_list, output_xtc, temp_dir):
     """
-    여러 XTC 파일들을 시간 보정하여 하나의 XTC로 연결 (Protein + Ligand만, 물/이온 제외)
+    여러 XTC 파일들을 시간 보정하여 하나의 XTC로 연결
     
     Args:
         trajectory_info_list: [(xtc_file, tpr_file, is_long_md, iter_num), ...] 형식의 리스트
@@ -212,7 +151,6 @@ def concatenate_trajectories_to_xtc(trajectory_info_list, output_xtc, temp_dir):
         return False, {}
     
     print(f"  XTC 파일 시간 보정 및 연결 중: {len(trajectory_info_list)}개 궤적")
-    print(f"  추출 대상: Protein + Ligand (물, 이온 제외)")
     
     adjusted_files = []
     time_info = {
@@ -222,443 +160,510 @@ def concatenate_trajectories_to_xtc(trajectory_info_list, output_xtc, temp_dir):
     
     cumulative_time = 0.0  # 누적 시간 (ps)
     
-    # 1단계: 각 XTC의 시간 보정 및 Protein+Ligand 추출
+    # 1단계: 각 XTC의 시간 보정
     for idx, (src_xtc, src_tpr, is_long_md, iter_num) in enumerate(trajectory_info_list):
         print(f"  처리 중: Iteration {iter_num} (시작 시간: {cumulative_time:.1f} ps)")
         
-        # 원본 XTC의 시간 범위 확인
+        # 원본 XTC의 시간 정보 추출
         start_time, end_time = get_trajectory_time_info(src_tpr, src_xtc, temp_dir)
         duration = end_time - start_time
         
-        print(f"    원본 시간 범위: {start_time:.1f} - {end_time:.1f} ps (길이: {duration:.1f} ps)")
-        
-        # 시간 조정 및 Protein+Ligand 추출된 XTC 생성
+        # 시간 보정된 XTC 파일 생성
         adjusted_xtc = os.path.join(temp_dir, f"adjusted_{idx:03d}.xtc")
         
-        if adjust_trajectory_time(src_xtc, adjusted_xtc, cumulative_time, src_tpr, temp_dir):
-            adjusted_files.append(adjusted_xtc)
-            
-            # 시간 정보 기록
-            iter_info = {
-                "iteration": iter_num,
-                "start_time_ps": cumulative_time,
-                "end_time_ps": cumulative_time + duration,
-                "duration_ps": duration,
-                "is_long_md": is_long_md
-            }
-            time_info["iterations"].append(iter_info)
-            
-            print(f"    ✓ 조정 완료: {cumulative_time:.1f} - {cumulative_time + duration:.1f} ps")
-            
-            # 다음 iteration의 시작 시간 설정
-            cumulative_time += duration
-        else:
-            print(f"    ✗ 시간 조정 실패, 건너뜀")
-            return False, {}
-    
-    time_info["total_time_ps"] = cumulative_time
-    time_info["total_time_ns"] = cumulative_time / 1000.0
-    
-    print(f"\n  총 시뮬레이션 시간: {time_info['total_time_ns']:.2f} ns")
-    
-    # 2단계: 조정된 XTC들을 하나로 연결
-    if not adjusted_files:
-        return False, {}
-    
-    print(f"\n  최종 XTC 연결 중...")
-    traj_list = " ".join(adjusted_files)
-    
-    # trjcat으로 연결 (시간이 이미 조정되었으므로 -settime 불필요)
-    cmd = f"gmx trjcat -f {traj_list} -o {output_xtc} -cat"
-    
-    try:
+        # trjconv로 시작 시간 조정
+        cmd = f"echo 'System' | gmx trjconv -s {src_tpr} -f {src_xtc} -o {adjusted_xtc} -t0 {cumulative_time}"
+        
         result = subprocess.run(
             cmd, shell=True, cwd=temp_dir,
             capture_output=True, text=True, timeout=3600
         )
+        
+        if result.returncode != 0:
+            print(f"  ⚠ 시간 조정 실패: {result.stderr}")
+            return False, {}
+        
+        adjusted_files.append(adjusted_xtc)
+        
+        # 시간 정보 기록
+        iter_time_info = {
+            "iteration": iter_num,
+            "start_time_ps": cumulative_time,
+            "end_time_ps": cumulative_time + duration,
+            "duration_ps": duration,
+            "is_long_md": is_long_md
+        }
+        time_info["iterations"].append(iter_time_info)
+        
+        cumulative_time += duration
+        print(f"  ✓ 조정 완료: {cumulative_time:.1f} ps까지")
+    
+    time_info["total_time_ps"] = cumulative_time
+    time_info["total_time_ns"] = cumulative_time / 1000.0
+    
+    # 2단계: 모든 조정된 XTC를 하나로 연결
+    try:
+        print(f"\n  최종 XTC 파일 생성 중...")
+        
+        # trjcat으로 연결
+        input_files = " ".join(adjusted_files)
+        cmd = f"gmx trjcat -f {input_files} -o {output_xtc} -cat"
+        
+        result = subprocess.run(
+            cmd, shell=True, cwd=temp_dir,
+            capture_output=True, text=True, timeout=7200
+        )
+        
         if result.returncode != 0:
             print(f"  ⚠ XTC 연결 실패: {result.stderr}")
             return False, {}
         
-        print(f"  ✓ 최종 XTC 생성 완료 (Protein + Ligand만 포함)")
+        print(f"  ✓ 최종 XTC 생성 완료")
         return True, time_info
         
     except Exception as e:
         print(f"  ⚠ XTC 연결 중 오류: {e}")
         return False, {}
+
+def find_all_structure_directories(base_dir):
+    """
+    주어진 경로에서 structure_{PDBID}_struct_{번호} 디렉토리들을 재귀적으로 탐색
+    structure_pool 같은 다른 structure_ 디렉토리는 제외
+    
+    Returns:
+        structure_dirs: [(structure_path, pdb_info), ...] 형식의 리스트
+    """
+    import re
+    
+    structure_dirs = []
+    
+    # structure_{PDBID}_struct_{번호} 패턴
+    # 예: structure_1ABI_struct_000, structure_7KI0_struct_001
+    structure_pattern = re.compile(r'^structure_([A-Z0-9]{4})_struct_(\d+)$')
+    
+    # 직접 iteration이 있는 경우 (structure_{PDBID}_struct_{번호} 레벨)
+    iteration_dirs = [d for d in os.listdir(base_dir) 
+                     if d.startswith("iteration_") and os.path.isdir(os.path.join(base_dir, d))]
+    
+    if iteration_dirs:
+        # 현재 디렉토리가 structure 디렉토리인지 확인
+        dir_name = os.path.basename(base_dir)
+        if structure_pattern.match(dir_name):
+            parent_name = os.path.basename(os.path.dirname(base_dir))
+            structure_dirs.append((base_dir, {
+                'structure_name': dir_name,
+                'pdb_name': parent_name
+            }))
+            return structure_dirs
+    
+    # 하위 디렉토리 탐색
+    try:
+        for item in os.listdir(base_dir):
+            item_path = os.path.join(base_dir, item)
+            if os.path.isdir(item_path):
+                # structure_{PDBID}_struct_{번호} 패턴에 맞는 디렉토리만
+                if structure_pattern.match(item):
+                    sub_iterations = [d for d in os.listdir(item_path)
+                                     if d.startswith("iteration_") and 
+                                     os.path.isdir(os.path.join(item_path, d))]
+                    if sub_iterations:
+                        parent_name = os.path.basename(base_dir)
+                        structure_dirs.append((item_path, {
+                            'structure_name': item,
+                            'pdb_name': parent_name
+                        }))
+                # structure_로 시작하지 않는 디렉토리는 재귀 탐색 (1ABI_H_A 같은 폴더)
+                elif not item.startswith("structure_"):
+                    structure_dirs.extend(find_all_structure_directories(item_path))
+    except PermissionError:
+        pass
+    
+    return structure_dirs
     
 def collect_trajectories_as_xtc(sumd_output_dir, output_dir="collected_trajectories"):
     """
     SuMD 시뮬레이션의 모든 성공한 attempt 궤적을 시간 보정하여 XTC 파일로 수집
-    (Protein + Ligand만 포함, 물과 이온 제외)
     
     Args:
-        sumd_output_dir: SuMD 출력 디렉토리 경로
+        sumd_output_dir: SuMD 출력 디렉토리 경로 (job_output 또는 structure_XXXX 레벨 모두 가능)
         output_dir: 수집된 궤적을 저장할 디렉토리 이름
     """
-    print(f"SuMD 궤적 XTC 수집 시작 (시간 보정, Protein+Ligand만): {sumd_output_dir}")
+    print(f"SuMD 궤적 XTC 수집 시작 (시간 보정): {sumd_output_dir}")
     
-    # 출력 디렉토리 생성
-    full_output_dir = os.path.join(sumd_output_dir, output_dir)
-    if os.path.exists(full_output_dir):
-        shutil.rmtree(full_output_dir)
-    os.makedirs(full_output_dir)
+    # 모든 structure 디렉토리 찾기
+    structure_dirs = find_all_structure_directories(sumd_output_dir)
     
-    # 임시 작업 디렉토리
-    temp_dir = os.path.join(full_output_dir, "temp_xtc")
-    os.makedirs(temp_dir)
+    if not structure_dirs:
+        print("❌ 처리할 structure 디렉토리를 찾을 수 없습니다.")
+        return None, 0
     
-    collected_info = {
-        "collection_time": datetime.now().isoformat(),
-        "source_directory": sumd_output_dir,
-        "format": "xtc",
-        "time_corrected": True,
-        "iterations": []
-    }
+    print(f"발견된 structure 디렉토리 수: {len(structure_dirs)}")
     
-    trajectory_info_list = []  # [(xtc, tpr, is_long_md, iter_num), ...]
+    total_processed = 0
     
-    # 1. 초기 구조 (target_chains.pdb) -> initial_structure.pdb
-    target_chains_path = os.path.join(sumd_output_dir, "target_chains.pdb")
-    if os.path.exists(target_chains_path):
-        initial_pdb = os.path.join(full_output_dir, "initial_structure.pdb")
-        shutil.copy(target_chains_path, initial_pdb)
-        
-        collected_info["initial_structure"] = "initial_structure.pdb"
-        print(f"✓ 초기 구조 저장: initial_structure.pdb")
-    else:
-        print("⚠ target_chains.pdb를 찾을 수 없습니다.")
-    
-    # 2. Iteration별 성공한 attempt의 궤적 수집
-    iteration_dirs = []
-    for item in os.listdir(sumd_output_dir):
-        if item.startswith("iteration_") and os.path.isdir(os.path.join(sumd_output_dir, item)):
-            try:
-                iter_num_str = item.replace("iteration_", "")
-                if "_" in iter_num_str:
-                    iter_num = int(iter_num_str.split("_")[0])
-                else:
-                    iter_num = int(iter_num_str)
-                iteration_dirs.append((iter_num, item))
-            except ValueError:
-                continue
-    
-    # 번호 순으로 정렬
-    iteration_dirs.sort(key=lambda x: x[0])
-    
-    print(f"발견된 iteration 디렉토리 수: {len(iteration_dirs)}")
-    
-    for iter_num, iter_dir in iteration_dirs:
-        print(f"\n=== Iteration {iter_num} 정보 수집 중 ===")
-        
-        iter_path = os.path.join(sumd_output_dir, iter_dir)
-        summary_file = os.path.join(sumd_output_dir, f"{iter_dir}_summary.json")
-        
-        # summary 파일에서 성공 정보 읽기
-        iteration_summary = {}
-        if os.path.exists(summary_file):
-            try:
-                with open(summary_file, 'r') as f:
-                    iteration_summary = json.load(f)
-            except:
-                print(f"  ⚠ {iter_dir}_summary.json 읽기 실패")
-                continue
-        else:
-            print(f"  ⚠ {iter_dir}_summary.json 파일이 없습니다")
-            continue
-        
-        # 성공한 attempt 찾기
-        attempt_info = find_successful_attempt(iter_path, iteration_summary)
-        if not attempt_info:
-            print(f"  ⚠ Iteration {iter_num}: 성공한 attempt를 찾을 수 없습니다")
-            continue
-        
-        attempt_dir, attempt_num = attempt_info
-        print(f"  ✓ 성공한 attempt: {attempt_num}")
-        
-        # XTC/TPR 파일 확인
-        src_xtc = os.path.join(attempt_dir, "md.xtc")
-        src_tpr = os.path.join(attempt_dir, "md.tpr")
-        
-        if not os.path.exists(src_xtc) or not os.path.exists(src_tpr):
-            print(f"  ⚠ Iteration {iter_num}: XTC 또는 TPR 파일이 없습니다")
-            continue
-        
-        is_long_md = iteration_summary.get("long_md", False)
-        
-        # 궤적 정보 리스트에 추가
-        trajectory_info_list.append((src_xtc, src_tpr, is_long_md, iter_num))
-        
-        # iteration 기본 정보 기록 (시간 정보는 나중에 추가)
-        iteration_info = {
-            "type": "md_trajectory",
-            "iteration_number": iter_num,
-            "attempt_number": attempt_num,
-            "source": f"{iter_dir}/attempt_{attempt_num}/md.xtc",
-            "description": f"Iteration {iter_num} MD 궤적 (Attempt {attempt_num})",
-            "is_long_md": is_long_md
-        }
-        
-        # summary에서 추가 정보
-        if iteration_summary.get("final_result"):
-            result = iteration_summary["final_result"]
-            iteration_info.update({
-                "slope": result.get("slope"),
-                "min_distance": result.get("min_distance"),
-                "initial_distance": result.get("initial_distance"),
-                "final_distance": result.get("final_distance")
-            })
-        
-        collected_info["iterations"].append(iteration_info)
-        
-        long_md_mark = "(Long MD)" if is_long_md else ""
-        print(f"  ✓ 궤적 추가 대기: iter_{iter_num:03d} {long_md_mark}")
-    
-    # 모든 궤적을 시간 보정하여 하나의 XTC로 연결
-    if trajectory_info_list:
-        final_xtc = os.path.join(full_output_dir, "complete_trajectory.xtc")
+    # 각 structure 디렉토리 처리
+    for structure_path, structure_info in structure_dirs:
         print(f"\n{'='*60}")
-        print(f"시간 보정 및 연속 궤적 생성 시작")
+        print(f"처리 중: {structure_info['pdb_name']}/{structure_info['structure_name']}")
         print(f"{'='*60}")
         
-        success, time_info = concatenate_trajectories_to_xtc(
-            trajectory_info_list, final_xtc, temp_dir
-        )
+        # 출력 디렉토리 생성
+        full_output_dir = os.path.join(structure_path, output_dir)
+        if os.path.exists(full_output_dir):
+            shutil.rmtree(full_output_dir)
+        os.makedirs(full_output_dir)
         
-        if success:
-            print(f"\n✓ 연속 궤적 생성 완료: complete_trajectory.xtc")
-            print(f"  총 시뮬레이션 시간: {time_info['total_time_ns']:.2f} ns ({time_info['total_time_ps']:.1f} ps)")
-            
-            collected_info["trajectory_file"] = "complete_trajectory.xtc"
-            collected_info["total_iterations"] = len(trajectory_info_list)
-            collected_info["time_info"] = time_info
-            
-            # 각 iteration 정보에 시간 정보 추가
-            for i, iter_info in enumerate(collected_info["iterations"]):
-                if i < len(time_info["iterations"]):
-                    iter_info.update(time_info["iterations"][i])
-            
-            # 첫 번째 TPR 파일도 복사 (시각화용)
-            first_tpr = trajectory_info_list[0][1]
-            ref_tpr = os.path.join(full_output_dir, "reference.tpr")
-            shutil.copy(first_tpr, ref_tpr)
-            collected_info["reference_tpr"] = "reference.tpr"
-            print(f"✓ 참조 TPR 저장: reference.tpr")
-        else:
-            print(f"⚠ XTC 연결 실패")
-    
-    # 임시 디렉토리 정리
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
-    
-    # 수집 정보 저장
-    info_file = os.path.join(full_output_dir, "collection_info.json")
-    with open(info_file, 'w') as f:
-        json.dump(collected_info, f, indent=2, ensure_ascii=False)
-    
-    # 요약 텍스트 파일 생성 부분 수정
-    summary_file = os.path.join(full_output_dir, "trajectory_summary.txt")
-    with open(summary_file, 'w', encoding='utf-8') as f:
-        f.write(f"SuMD 궤적 요약 (XTC 형식, 시간 보정 적용)\n")
-        f.write(f"포함: Protein + Ligand\n")
-        f.write(f"제외: 물(SOL), 이온(NA, CL, K, MG, CA)\n")
-        f.write(f"수집 시간: {collected_info['collection_time']}\n")
-        f.write(f"처리된 iteration 수: {collected_info.get('total_iterations', 0)}\n")
-        f.write(f"총 시뮬레이션 시간: {collected_info.get('time_info', {}).get('total_time_ns', 0):.2f} ns\n")
-        f.write(f"출력 파일: complete_trajectory.xtc\n")
-        f.write("="*60 + "\n\n")
+        # 임시 작업 디렉토리
+        temp_dir = os.path.join(full_output_dir, "temp_xtc")
+        os.makedirs(temp_dir)
         
-        f.write("시간별 Iteration 정보:\n")
-        f.write("-"*60 + "\n")
-        for info in collected_info["iterations"]:
-            f.write(f"\nIteration {info['iteration_number']}: {info['description']}\n")
-            if 'start_time_ps' in info:
-                f.write(f"  - 시간 범위: {info['start_time_ps']:.1f} - {info['end_time_ps']:.1f} ps\n")
-                f.write(f"  - 지속 시간: {info['duration_ps']:.1f} ps ({info['duration_ps']/1000:.2f} ns)\n")
-            if 'min_distance' in info:
-                f.write(f"  - 최소거리: {info['min_distance']:.2f}Å\n")
-            if 'slope' in info:
-                f.write(f"  - 기울기: {info['slope']:.6f}\n")
-            if info.get("is_long_md"):
-                f.write(f"  - Long MD 궤적\n")
+        collected_info = {
+            "collection_time": datetime.now().isoformat(),
+            "source_directory": structure_path,
+            "pdb_name": structure_info['pdb_name'],
+            "structure_name": structure_info['structure_name'],
+            "format": "xtc",
+            "time_corrected": True,
+            "iterations": []
+        }
+        
+        trajectory_info_list = []  # [(xtc, tpr, is_long_md, iter_num), ...]
+        
+        # Iteration별 성공한 attempt의 궤적 수집
+        iteration_dirs = []
+        for item in os.listdir(structure_path):
+            if item.startswith("iteration_") and os.path.isdir(os.path.join(structure_path, item)):
+                try:
+                    iter_num_str = item.replace("iteration_", "")
+                    if "_" in iter_num_str:
+                        iter_num = int(iter_num_str.split("_")[0])
+                    else:
+                        iter_num = int(iter_num_str)
+                    iteration_dirs.append((iter_num, item))
+                except ValueError:
+                    continue
+        
+        # 번호 순으로 정렬
+        iteration_dirs.sort(key=lambda x: x[0])
+        
+        print(f"발견된 iteration 디렉토리 수: {len(iteration_dirs)}")
+        
+        for iter_num, iter_dir in iteration_dirs:
+            print(f"\n=== Iteration {iter_num} 정보 수집 중 ===")
+            
+            iter_path = os.path.join(structure_path, iter_dir)
+            summary_file = os.path.join(structure_path, f"{iter_dir}_summary.json")
+            
+            # summary 파일에서 성공 정보 읽기
+            iteration_summary = {}
+            if os.path.exists(summary_file):
+                try:
+                    with open(summary_file, 'r') as f:
+                        iteration_summary = json.load(f)
+                except:
+                    print(f"  ⚠ {iter_dir}_summary.json 읽기 실패")
+                    continue
+            else:
+                print(f"  ⚠ {iter_dir}_summary.json 파일이 없습니다")
+                continue
+            
+            # 성공한 attempt 찾기
+            attempt_info = find_successful_attempt(iter_path, iteration_summary)
+            if not attempt_info:
+                print(f"  ⚠ Iteration {iter_num}: 성공한 attempt를 찾을 수 없습니다")
+                continue
+            
+            attempt_dir, attempt_num = attempt_info
+            print(f"  ✓ 성공한 attempt: {attempt_num}")
+            
+            # XTC/TPR 파일 확인
+            src_xtc = os.path.join(attempt_dir, "md.xtc")
+            src_tpr = os.path.join(attempt_dir, "md.tpr")
+            
+            if not os.path.exists(src_xtc) or not os.path.exists(src_tpr):
+                print(f"  ⚠ Iteration {iter_num}: XTC 또는 TPR 파일이 없습니다")
+                continue
+            
+            is_long_md = iteration_summary.get("long_md", False)
+            
+            # 궤적 정보 리스트에 추가
+            trajectory_info_list.append((src_xtc, src_tpr, is_long_md, iter_num))
+            
+            # iteration 기본 정보 기록
+            iteration_info = {
+                "type": "md_trajectory",
+                "iteration_number": iter_num,
+                "attempt_number": attempt_num,
+                "source": f"{iter_dir}/attempt_{attempt_num}/md.xtc",
+                "description": f"Iteration {iter_num} MD 궤적 (Attempt {attempt_num})",
+                "is_long_md": is_long_md
+            }
+            
+            # summary에서 추가 정보
+            if iteration_summary.get("final_result"):
+                result = iteration_summary["final_result"]
+                iteration_info.update({
+                    "slope": result.get("slope"),
+                    "min_distance": result.get("min_distance"),
+                    "initial_distance": result.get("initial_distance"),
+                    "final_distance": result.get("final_distance")
+                })
+            
+            collected_info["iterations"].append(iteration_info)
+            
+            long_md_mark = "(Long MD)" if is_long_md else ""
+            print(f"  ✓ 궤적 추가 대기: iter_{iter_num:03d} {long_md_mark}")
+        
+        # 모든 궤적을 시간 보정하여 하나의 XTC로 연결
+        if trajectory_info_list:
+            final_xtc = os.path.join(full_output_dir, "complete_trajectory.xtc")
+            print(f"\n{'='*60}")
+            print(f"시간 보정 및 연속 궤적 생성 시작")
+            print(f"{'='*60}")
+            
+            success, time_info = concatenate_trajectories_to_xtc(
+                trajectory_info_list, final_xtc, temp_dir
+            )
+            
+            if success:
+                print(f"\n✓ 연속 궤적 생성 완료: complete_trajectory.xtc")
+                print(f"  총 시뮬레이션 시간: {time_info['total_time_ns']:.2f} ns ({time_info['total_time_ps']:.1f} ps)")
+                
+                collected_info["trajectory_file"] = "complete_trajectory.xtc"
+                collected_info["total_iterations"] = len(trajectory_info_list)
+                collected_info["time_info"] = time_info
+                
+                # 각 iteration 정보에 시간 정보 추가
+                for i, iter_info in enumerate(collected_info["iterations"]):
+                    if i < len(time_info["iterations"]):
+                        iter_info.update(time_info["iterations"][i])
+                
+                # 첫 번째 TPR 파일도 복사 (시각화용)
+                first_tpr = trajectory_info_list[0][1]
+                ref_tpr = os.path.join(full_output_dir, "reference.tpr")
+                shutil.copy(first_tpr, ref_tpr)
+                collected_info["reference_tpr"] = "reference.tpr"
+                print(f"✓ 참조 TPR 저장: reference.tpr")
+                
+                total_processed += 1
+            else:
+                print(f"⚠ XTC 연결 실패")
+        
+        # 임시 디렉토리 정리
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        
+        # 수집 정보 저장
+        info_file = os.path.join(full_output_dir, "collection_info.json")
+        with open(info_file, 'w') as f:
+            json.dump(collected_info, f, indent=2, ensure_ascii=False)
+        
+        # 요약 텍스트 파일 생성
+        summary_file = os.path.join(full_output_dir, "trajectory_summary.txt")
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            f.write(f"SuMD 궤적 요약 (XTC 형식, 시간 보정 적용)\n")
+            f.write(f"PDB: {collected_info['pdb_name']}\n")
+            f.write(f"Structure: {collected_info['structure_name']}\n")
+            f.write(f"수집 시간: {collected_info['collection_time']}\n")
+            f.write(f"처리된 iteration 수: {collected_info.get('total_iterations', 0)}\n")
+            f.write(f"총 시뮬레이션 시간: {collected_info.get('time_info', {}).get('total_time_ns', 0):.2f} ns\n")
+            f.write(f"출력 파일: complete_trajectory.xtc\n")
+            f.write("="*60 + "\n\n")
+            
+            f.write("시간별 Iteration 정보:\n")
+            f.write("-"*60 + "\n")
+            for info in collected_info["iterations"]:
+                f.write(f"\nIteration {info['iteration_number']}: {info['description']}\n")
+                if 'start_time_ps' in info:
+                    f.write(f"  - 시간 범위: {info['start_time_ps']:.1f} - {info['end_time_ps']:.1f} ps\n")
+                    f.write(f"  - 지속 시간: {info['duration_ps']:.1f} ps ({info['duration_ps']/1000:.2f} ns)\n")
+                if 'min_distance' in info:
+                    f.write(f"  - 최소거리: {info['min_distance']:.2f}Å\n")
+                if 'slope' in info:
+                    f.write(f"  - 기울기: {info['slope']:.6f}\n")
+                if info.get("is_long_md"):
+                    f.write(f"  - Long MD 궤적\n")
+        
+        print(f"\n{'='*60}")
+        print(f"Structure 처리 완료: {structure_info['structure_name']}")
+        print(f"{'='*60}")
+        print(f"처리된 iteration 수: {collected_info.get('total_iterations', 0)}")
+        print(f"총 시뮬레이션 시간: {collected_info.get('time_info', {}).get('total_time_ns', 0):.2f} ns")
+        print(f"저장 위치: {full_output_dir}")
     
     print(f"\n{'='*60}")
-    print(f"수집 완료")
+    print(f"전체 수집 완료")
     print(f"{'='*60}")
-    print(f"처리된 iteration 수: {collected_info.get('total_iterations', 0)}")
-    print(f"총 시뮬레이션 시간: {collected_info.get('time_info', {}).get('total_time_ns', 0):.2f} ns")
-    print(f"저장 위치: {full_output_dir}")
-    print(f"궤적 파일: complete_trajectory.xtc")
-    print(f"상세 정보: {info_file}")
-    print(f"요약 파일: {summary_file}")
+    print(f"처리된 structure 수: {total_processed}/{len(structure_dirs)}")
     
-    return full_output_dir, collected_info.get('total_iterations', 0)
+    return sumd_output_dir, total_processed
 
 def collect_sumd_trajectories(sumd_output_dir, output_dir="collected_trajectories"):
     """
-    SuMD 시뮬레이션의 모든 성공한 attempt 궤적을 프레임별로 수집    
+    SuMD 시뮬레이션의 모든 성공한 attempt 궤적을 프레임별로 수집
+    
     Args:
-        sumd_output_dir: SuMD 출력 디렉토리 경로
+        sumd_output_dir: SuMD 출력 디렉토리 경로 (job_output 또는 structure_XXXX 레벨 모두 가능)
         output_dir: 수집된 구조들을 저장할 디렉토리 이름
     """
     print(f"SuMD 궤적 프레임 수집 시작: {sumd_output_dir}")
     
-    # 출력 디렉토리 생성
-    full_output_dir = os.path.join(sumd_output_dir, output_dir)
-    if os.path.exists(full_output_dir):
-        shutil.rmtree(full_output_dir)
-    os.makedirs(full_output_dir)
+    # 모든 structure 디렉토리 찾기
+    structure_dirs = find_all_structure_directories(sumd_output_dir)
     
-    # 임시 작업 디렉토리
-    temp_dir = os.path.join(full_output_dir, "temp_extraction")
-    os.makedirs(temp_dir)
+    if not structure_dirs:
+        print("❌ 처리할 structure 디렉토리를 찾을 수 없습니다.")
+        return None, 0
     
-    structure_count = 0
-    collected_info = {
-        "collection_time": datetime.now().isoformat(),
-        "source_directory": sumd_output_dir,
-        "total_frames": 0,
-        "iterations": []
-    }
+    print(f"발견된 structure 디렉토리 수: {len(structure_dirs)}")
     
-    # 1. 초기 구조 (target_chains.pdb) -> frame_000000.pdb
-    target_chains_path = os.path.join(sumd_output_dir, "target_chains.pdb")
-    if os.path.exists(target_chains_path):
-        dest_path = os.path.join(full_output_dir, f"frame_{structure_count:06d}.pdb")
-        shutil.copy(target_chains_path, dest_path)
-        
-        collected_info["iterations"].append({
-            "type": "initial_structure",
-            "source": "target_chains.pdb",
-            "frame_start": structure_count,
-            "frame_count": 1,
-            "description": "초기 타겟 체인 구조"
-        })
-        
-        print(f"✓ Frame {structure_count:06d}: 초기 구조 (target_chains.pdb)")
-        structure_count += 1
-    else:
-        print("⚠ target_chains.pdb를 찾을 수 없습니다.")
+    total_frames_all = 0
     
-    # 2. Iteration별 성공한 attempt의 궤적 수집
-    iteration_dirs = []
-    for item in os.listdir(sumd_output_dir):
-        if item.startswith("iteration_") and os.path.isdir(os.path.join(sumd_output_dir, item)):
-            try:
-                iter_num_str = item.replace("iteration_", "")
-                if "_" in iter_num_str:
-                    iter_num = int(iter_num_str.split("_")[0])
-                else:
-                    iter_num = int(iter_num_str)
-                iteration_dirs.append((iter_num, item))
-            except ValueError:
-                continue
-    
-    # 번호 순으로 정렬
-    iteration_dirs.sort(key=lambda x: x[0])
-    
-    print(f"발견된 iteration 디렉토리 수: {len(iteration_dirs)}")
-    
-    for iter_num, iter_dir in iteration_dirs:
-        print(f"\n=== Iteration {iter_num} 처리 중 ===")
+    # 각 structure 디렉토리 처리
+    for structure_path, structure_info in structure_dirs:
+        print(f"\n{'='*60}")
+        print(f"처리 중: {structure_info['pdb_name']}/{structure_info['structure_name']}")
+        print(f"{'='*60}")
         
-        iter_path = os.path.join(sumd_output_dir, iter_dir)
-        summary_file = os.path.join(sumd_output_dir, f"{iter_dir}_summary.json")
+        # 출력 디렉토리 생성
+        full_output_dir = os.path.join(structure_path, output_dir)
+        if os.path.exists(full_output_dir):
+            shutil.rmtree(full_output_dir)
+        os.makedirs(full_output_dir)
         
-        # summary 파일에서 성공 정보 읽기
-        iteration_summary = {}
-        if os.path.exists(summary_file):
-            try:
-                with open(summary_file, 'r') as f:
-                    iteration_summary = json.load(f)
-            except:
-                print(f"  ⚠ {iter_dir}_summary.json 읽기 실패")
-                continue
-        else:
-            print(f"  ⚠ {iter_dir}_summary.json 파일이 없습니다")
-            continue
+        # 임시 작업 디렉토리
+        temp_dir = os.path.join(full_output_dir, "temp_extraction")
+        os.makedirs(temp_dir)
         
-        # 성공한 attempt 찾기
-        attempt_info = find_successful_attempt(iter_path, iteration_summary)
-        if not attempt_info:
-            print(f"  ⚠ Iteration {iter_num}: 성공한 attempt를 찾을 수 없습니다")
-            continue
-        
-        attempt_dir, attempt_num = attempt_info
-        print(f"  ✓ 성공한 attempt: {attempt_num}")
-        
-        # 궤적 추출
-        tpr_file = os.path.join(attempt_dir, "md.tpr")
-        xtc_file = os.path.join(attempt_dir, "md.xtc")
-        
-        # 임시 디렉토리에서 프레임 추출
-        temp_prefix = f"iter_{iter_num:03d}"
-        frame_files = extract_trajectory_frames(tpr_file, xtc_file, temp_dir, temp_prefix)
-        
-        if not frame_files:
-            print(f"  ⚠ Iteration {iter_num}: 프레임 추출 실패")
-            continue
-        
-        # 프레임들을 최종 위치로 복사하고 번호 매기기
-        frame_start = structure_count
-        for i, frame_file in enumerate(frame_files):
-            dest_path = os.path.join(full_output_dir, f"frame_{structure_count:06d}.pdb")
-            shutil.copy(frame_file, dest_path)
-            os.remove(frame_file)  # 임시 파일 삭제
-            structure_count += 1
-        
-        # iteration 정보 기록
-        iteration_info = {
-            "type": "md_trajectory",
-            "iteration_number": iter_num,
-            "attempt_number": attempt_num,
-            "source": f"{iter_dir}/attempt_{attempt_num}/md.xtc",
-            "frame_start": frame_start,
-            "frame_count": len(frame_files),
-            "description": f"Iteration {iter_num} MD 궤적 (Attempt {attempt_num})",
-            "is_long_md": iteration_summary.get("long_md", False)
+        structure_count = 0
+        collected_info = {
+            "collection_time": datetime.now().isoformat(),
+            "source_directory": structure_path,
+            "pdb_name": structure_info['pdb_name'],
+            "structure_name": structure_info['structure_name'],
+            "total_frames": 0,
+            "iterations": []
         }
         
-        # summary에서 추가 정보
-        if iteration_summary.get("final_result"):
-            result = iteration_summary["final_result"]
-            iteration_info.update({
-                "slope": result.get("slope"),
-                "min_distance": result.get("min_distance"),
-                "initial_distance": result.get("initial_distance"),
-                "final_distance": result.get("final_distance")
-            })
+        # Iteration별 성공한 attempt의 궤적 수집
+        iteration_dirs = []
+        for item in os.listdir(structure_path):
+            if item.startswith("iteration_") and os.path.isdir(os.path.join(structure_path, item)):
+                try:
+                    iter_num_str = item.replace("iteration_", "")
+                    if "_" in iter_num_str:
+                        iter_num = int(iter_num_str.split("_")[0])
+                    else:
+                        iter_num = int(iter_num_str)
+                    iteration_dirs.append((iter_num, item))
+                except ValueError:
+                    continue
         
-        collected_info["iterations"].append(iteration_info)
+        # 번호 순으로 정렬
+        iteration_dirs.sort(key=lambda x: x[0])
         
-        long_md_mark = "(Long MD)" if iteration_info.get("is_long_md") else ""
-        print(f"  ✓ Frames {frame_start:06d}-{structure_count-1:06d}: {len(frame_files)}개 프레임 수집 {long_md_mark}")
-    
-    # 임시 디렉토리 정리
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir)
-    
-    # 수집 정보 업데이트 및 저장
-    collected_info["total_frames"] = structure_count
-    collected_info["total_iterations"] = len([info for info in collected_info["iterations"] if info["type"] == "md_trajectory"])
-    
-    info_file = os.path.join(full_output_dir, "collection_info.json")
-    with open(info_file, 'w') as f:
-        json.dump(collected_info, f, indent=2, ensure_ascii=False)
-    
-    # 요약 텍스트 파일 생성
-    summary_file = os.path.join(full_output_dir, "frames_summary.txt")
-    with open(summary_file, 'w', encoding='utf-8') as f:
-        f.write(f"SuMD 궤적 프레임 요약\n")
-        f.write(f"수집 시간: {collected_info['collection_time']}\n")
-        f.write(f"총 프레임 수: {structure_count}\n")
-        f.write(f"처리된 iteration 수: {collected_info['total_iterations']}\n")
-        f.write("="*50 + "\n\n")
+        print(f"발견된 iteration 디렉토리 수: {len(iteration_dirs)}")
         
-        for info in collected_info["iterations"]:
-            if info["type"] == "initial_structure":
-                f.write(f"Frame {info['frame_start']:06d}: {info['description']}\n")
+        for iter_num, iter_dir in iteration_dirs:
+            print(f"\n=== Iteration {iter_num} 처리 중 ===")
+            
+            iter_path = os.path.join(structure_path, iter_dir)
+            summary_file = os.path.join(structure_path, f"{iter_dir}_summary.json")
+            
+            # summary 파일에서 성공 정보 읽기
+            iteration_summary = {}
+            if os.path.exists(summary_file):
+                try:
+                    with open(summary_file, 'r') as f:
+                        iteration_summary = json.load(f)
+                except:
+                    print(f"  ⚠ {iter_dir}_summary.json 읽기 실패")
+                    continue
             else:
+                print(f"  ⚠ {iter_dir}_summary.json 파일이 없습니다")
+                continue
+            
+            # 성공한 attempt 찾기
+            attempt_info = find_successful_attempt(iter_path, iteration_summary)
+            if not attempt_info:
+                print(f"  ⚠ Iteration {iter_num}: 성공한 attempt를 찾을 수 없습니다")
+                continue
+            
+            attempt_dir, attempt_num = attempt_info
+            print(f"  ✓ 성공한 attempt: {attempt_num}")
+            
+            # 궤적 추출
+            tpr_file = os.path.join(attempt_dir, "md.tpr")
+            xtc_file = os.path.join(attempt_dir, "md.xtc")
+            
+            # 임시 디렉토리에서 프레임 추출
+            temp_prefix = f"iter_{iter_num:03d}"
+            frame_files = extract_trajectory_frames(tpr_file, xtc_file, temp_dir, temp_prefix)
+            
+            if not frame_files:
+                print(f"  ⚠ Iteration {iter_num}: 프레임 추출 실패")
+                continue
+            
+            # 프레임들을 최종 위치로 복사하고 번호 매기기
+            frame_start = structure_count
+            for i, frame_file in enumerate(frame_files):
+                dest_path = os.path.join(full_output_dir, f"frame_{structure_count:06d}.pdb")
+                shutil.copy(frame_file, dest_path)
+                os.remove(frame_file)  # 임시 파일 삭제
+                structure_count += 1
+            
+            # iteration 정보 기록
+            iteration_info = {
+                "type": "md_trajectory",
+                "iteration_number": iter_num,
+                "attempt_number": attempt_num,
+                "source": f"{iter_dir}/attempt_{attempt_num}/md.xtc",
+                "frame_start": frame_start,
+                "frame_count": len(frame_files),
+                "description": f"Iteration {iter_num} MD 궤적 (Attempt {attempt_num})",
+                "is_long_md": iteration_summary.get("long_md", False)
+            }
+            
+            # summary에서 추가 정보
+            if iteration_summary.get("final_result"):
+                result = iteration_summary["final_result"]
+                iteration_info.update({
+                    "slope": result.get("slope"),
+                    "min_distance": result.get("min_distance"),
+                    "initial_distance": result.get("initial_distance"),
+                    "final_distance": result.get("final_distance")
+                })
+            
+            collected_info["iterations"].append(iteration_info)
+            
+            long_md_mark = "(Long MD)" if iteration_info.get("is_long_md") else ""
+            print(f"  ✓ Frames {frame_start:06d}-{structure_count-1:06d}: {len(frame_files)}개 프레임 수집 {long_md_mark}")
+        
+        # 임시 디렉토리 정리
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        
+        # 수집 정보 업데이트 및 저장
+        collected_info["total_frames"] = structure_count
+        collected_info["total_iterations"] = len([info for info in collected_info["iterations"] 
+                                                   if info["type"] == "md_trajectory"])
+        
+        info_file = os.path.join(full_output_dir, "collection_info.json")
+        with open(info_file, 'w') as f:
+            json.dump(collected_info, f, indent=2, ensure_ascii=False)
+        
+        # 요약 텍스트 파일 생성
+        summary_file = os.path.join(full_output_dir, "frames_summary.txt")
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            f.write(f"SuMD 궤적 프레임 요약\n")
+            f.write(f"PDB: {collected_info['pdb_name']}\n")
+            f.write(f"Structure: {collected_info['structure_name']}\n")
+            f.write(f"수집 시간: {collected_info['collection_time']}\n")
+            f.write(f"총 프레임 수: {structure_count}\n")
+            f.write(f"처리된 iteration 수: {collected_info['total_iterations']}\n")
+            f.write("="*50 + "\n\n")
+            
+            for info in collected_info["iterations"]:
                 f.write(f"Frames {info['frame_start']:06d}-{info['frame_start']+info['frame_count']-1:06d}: {info['description']}\n")
                 if 'min_distance' in info:
                     f.write(f"  - 최소거리: {info['min_distance']:.2f}Å\n")
@@ -666,16 +671,22 @@ def collect_sumd_trajectories(sumd_output_dir, output_dir="collected_trajectorie
                     f.write(f"  - 기울기: {info['slope']:.6f}\n")
                 if info.get("is_long_md"):
                     f.write(f"  - Long MD 궤적\n")
-            f.write("\n")
+                f.write("\n")
+        
+        print(f"\n=== Structure 수집 완료 ===")
+        print(f"수집된 프레임 수: {structure_count}")
+        print(f"처리된 iteration 수: {collected_info['total_iterations']}")
+        print(f"저장 위치: {full_output_dir}")
+        
+        total_frames_all += structure_count
     
-    print(f"\n=== 수집 완료 ===")
-    print(f"총 수집된 프레임 수: {structure_count}")
-    print(f"처리된 iteration 수: {collected_info['total_iterations']}")
-    print(f"저장 위치: {full_output_dir}")
-    print(f"상세 정보: {info_file}")
-    print(f"요약 파일: {summary_file}")
+    print(f"\n{'='*60}")
+    print(f"전체 수집 완료")
+    print(f"{'='*60}")
+    print(f"처리된 structure 수: {len(structure_dirs)}")
+    print(f"총 프레임 수: {total_frames_all}")
     
-    return full_output_dir, structure_count
+    return sumd_output_dir, total_frames_all
 
 def main():
     """메인 함수 - argparse로 명령행 인자 처리"""
