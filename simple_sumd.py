@@ -142,14 +142,6 @@ def handle_analysis_operations(context_info=None):
         suppress_traceback=True
     )
 
-def handle_gromacs_operations(context_info=None):
-    """GROMACS 작업용 예외 처리 데코레이터"""
-    return handle_exceptions(
-        mode=ErrorHandlingMode.RETURN_FALSE,
-        context_info=context_info,
-        log_level="error"
-    )
-
 def handle_structure_operations(default_return=None, context_info=None):
     """구조 처리용 예외 처리 데코레이터"""
     return handle_exceptions(
@@ -159,14 +151,6 @@ def handle_structure_operations(default_return=None, context_info=None):
         suppress_traceback=True
     )
 
-def handle_distance_calculations(default_distance=float('inf')):
-    """거리 계산용 예외 처리 데코레이터"""
-    return handle_exceptions(
-        mode=ErrorHandlingMode.RETURN_CUSTOM,
-        return_value=default_distance,
-        context_info="거리 계산",
-        suppress_traceback=True
-    )
 
 # ===== 간단한 유틸리티 함수들 =====
 def ensure_clean_dir(path):
