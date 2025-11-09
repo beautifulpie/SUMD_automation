@@ -353,13 +353,13 @@ def calculate_separation_axis(pdb_file, chain1, chain2):
         
         # receptor에서 ligand로 향하는 벡터 (멀어지는 방향)
         separation_vector = ligand_center - receptor_center
-        separation_vector = separation_vector / np.linalg.norm(separation_vector)
+        separation_vector_norm = separation_vector / np.linalg.norm(separation_vector)
         
         logger.debug(f"Receptor center: {receptor_center}")
         logger.debug(f"Ligand center: {ligand_center}")
-        logger.debug(f"분리 방향 (receptor→ligand): {separation_vector}")
+        logger.debug(f"분리 방향 (receptor→ligand): {separation_vector_norm}")
         
-        return separation_vector, chain_centers
+        return separation_vector_norm, separation_vector, chain_centers
     
     raise ValueError("체인 중심 계산 실패")
 
@@ -419,16 +419,16 @@ def generate_multi_direction_vectors(base_vector):
     return vectors
 
 @handle_file_operations("구조 이격 적용")
-def apply_structure_separation(input_pdb, output_pdb, separation_vector, distance, chain_to_move):
+def apply_structure_separation(input_pdb, output_pdb, separation_vector, chain_to_move):
     """구조에 이격 적용"""
 
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("structure", input_pdb)
     
     # 이동할 거리 벡터 계산 (Angstrom -> Angstrom)
-    move_vector = separation_vector * distance
+    move_vector = separation_vector
     
-    logger.debug(f"체인 {chain_to_move}를 {distance:.1f}Å 이동: {move_vector}")
+    logger.debug(f"체인 {chain_to_move}를 {np.linalg.norm(move_vector):.1f}Å 이동: {move_vector}")
     
     for model in structure:
         for chain in model:
@@ -616,7 +616,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
     
         
         # 1단계: 분리 축 계산
-        separation_vector, chain_centers = calculate_separation_axis(input_pdb, chain_to_stay, chain_to_move)
+        separation_vector, separation_vector_ori, chain_centers = calculate_separation_axis(input_pdb, chain_to_stay, chain_to_move)
         if separation_vector is None:
             logger.warning("분리 축 계산 실패 - 원본 구조 사용")
             return [input_pdb]
@@ -624,14 +624,16 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
         # 2단계: 다방향 벡터 생성 (원뿔형)
         direction_vectors = generate_multi_direction_vectors(separation_vector)
         
+        # 2-1단계: 다방향 벡터와 초기 거리 보정
+        direction_vectors_adjusted=[direction_vectors[i]*SEPARATION_DISTANCE-separation_vector_ori for i in range(len(direction_vectors))]
+        
         # 3단계: 각 방향으로 이격된 구조 생성
         base_structures = []
         
-        for i, direction in enumerate(direction_vectors):
+        for i, direction in enumerate(direction_vectors_adjusted):
             separated_pdb = os.path.join(pool_dir, format_filename('variant_separation', num=i))
             
-            if apply_structure_separation(input_pdb, separated_pdb, direction, 
-                                        SEPARATION_DISTANCE, chain_to_move):
+            if apply_structure_separation(input_pdb, separated_pdb, direction, chain_to_move):
                 base_structures.append(separated_pdb)
                 logger.info(f"이격 구조 {i} 생성: {separated_pdb}")
         
@@ -645,7 +647,7 @@ def create_initial_structure_pool(input_pdb, chain1, chain2, output_dir):
         # 구조 풀 정보 저장
         pool_info = {
             "total_structures": len(structure_pool),
-            "separation_directions": len(direction_vectors),
+            "separation_directions": len(direction_vectors_adjusted),
             "rotation_variants_per_structure": len(generate_structure_variants(base_structures[0], pool_dir, "test", chain_to_move)) if base_structures else 0,
             "structures": [os.path.basename(s) for s in structure_pool]
         }
