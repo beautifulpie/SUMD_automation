@@ -1973,6 +1973,9 @@ def make_dir(dir_path):
     if not os.path.exists(dir_path):
         os.makedirs(dir_path)
         logger.info(f"디렉토리 생성: {dir_path}")
+    else:
+        logger.error("이미 존재하는 폴더입니다!")
+        raise Exception("이미 존재하는 폴더입니다!")
 
 
 
@@ -2521,7 +2524,7 @@ def execute_simulation_pipeline(config):
     """시뮬레이션 파이프라인 실행"""
     # 출력 디렉토리 준비
     output_dir = os.path.abspath(config["output_dir"])
-    ensure_clean_dir(output_dir)
+    make_dir(output_dir)
     
     logger.info(f"=== {config['mode_name']} 시작 ===")
     logger.info(f"입력 경로: {config['input_path']}")
