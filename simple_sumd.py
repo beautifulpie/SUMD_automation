@@ -428,7 +428,7 @@ def apply_structure_separation(input_pdb, output_pdb, separation_vector, chain_t
     # 이동할 거리 벡터 계산 (Angstrom -> Angstrom)
     move_vector = separation_vector
     
-    logger.debug(f"체인 {chain_to_move}를 {np.linalg.norm(move_vector):.1f}Å 이동: {move_vector}")
+    logger.info(f"체인 {chain_to_move}를 {np.linalg.norm(move_vector):.1f}Å 이동: {move_vector}")
     
     for model in structure:
         for chain in model:
