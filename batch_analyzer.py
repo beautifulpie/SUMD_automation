@@ -238,27 +238,7 @@ class BatchAnalyzer:
             
             current_subplot = 1
             
-            # 1. PDB별 성공률
-            ax1 = plt.subplot(rows, cols, current_subplot)
-            current_subplot += 1
-            
-            if self.data['pdb_results']:
-                pdb_names = [p['pdb_code'] for p in self.data['pdb_results'][:15]]
-                pdb_success_rates = [p.get('max_successful_iterations', 0) for p in self.data['pdb_results'][:15]]
-                
-                bars = ax1.bar(range(len(pdb_names)), pdb_success_rates, alpha=0.7, color='skyblue')
-                ax1.set_xlabel('PDB Code')
-                ax1.set_ylabel('Max Successful Iterations')
-                ax1.set_title('Max Successful Iterations by PDB')
-                ax1.set_xticks(range(len(pdb_names)))
-                ax1.set_xticklabels(pdb_names, rotation=45)
-                ax1.yaxis.set_major_locator(MaxNLocator(integer=True))  # 정수 축
-                ax1.grid(True, alpha=0.3)
-            else:
-                ax1.text(0.5, 0.5, 'No PDB data available', ha='center', va='center', transform=ax1.transAxes)
-                ax1.set_title('Max Successful Iterations by PDB')
-            
-            # 2-N. 구조별 iteration 순차적 거리 변화 (동적 그래프 생성)
+            # 1-N. 구조별 iteration 순차적 거리 변화 (동적 그래프 생성)
             current_subplot = self._plot_distance_graphs(fig, rows, cols, current_subplot)
             
             # N+1. Iteration당 Attempt 수 분포
@@ -314,13 +294,7 @@ class BatchAnalyzer:
             else:
                 ax_dist.text(0.5, 0.5, 'No distance data', ha='center', va='center', transform=ax_dist.transAxes)
                 ax_dist.set_title('Minimum Distance Distribution')
-            
-            # N+3. Iteration별 성공/실패 횟수
-            ax_success = plt.subplot(rows, cols, current_subplot)
-            self._plot_iteration_success_failure_counts(ax_success)
-            
-            plt.tight_layout()
-            
+
             # 그래프 저장
             plot_path = os.path.join(self.output_dir, "comprehensive_analysis.png")
             plt.savefig(plot_path, dpi=300, bbox_inches='tight')
