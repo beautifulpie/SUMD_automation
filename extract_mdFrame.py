@@ -528,7 +528,7 @@ def collect_sumd_trajectories(sumd_output_dir, output_dir="collected_trajectorie
         # 출력 디렉토리 생성
         full_output_dir = os.path.join(structure_path, output_dir)
         if os.path.exists(full_output_dir):
-            shutil.rmtree(full_output_dir)
+            raise Exception("이미 존재하는 폴더!")
         os.makedirs(full_output_dir)
         
         # 임시 작업 디렉토리
